@@ -1,6 +1,8 @@
 const LEGACY_ROWS_STORAGE_KEY = "itemicostos.rows.v1";
 const PROJECTS_STORAGE_KEY = "itemicostos.projects.v2";
 const UI_STORAGE_KEY = "itemicostos.ui.v1";
+const SERVER_STATE_ENDPOINT = "/api/state";
+const REMOTE_SAVE_DEBOUNCE_MS = 300;
 
 const appLayout = document.querySelector("#app-layout");
 const itemTable = document.querySelector("#item-table");
@@ -16,8 +18,12 @@ const visibleCountInline = document.querySelector("#visible-count-inline");
 const selectedCode = document.querySelector("#selected-code");
 const filterStatus = document.querySelector("#filter-status");
 const saveStatus = document.querySelector("#save-status");
+const saveSnapshotButton = document.querySelector("#save-snapshot-button");
+const storageModePill = document.querySelector("#storage-mode-pill");
+const appModeLabel = document.querySelector("#app-mode-label");
 const searchInput = document.querySelector("#table-search-input");
 const searchWrap = document.querySelector("#search-wrap");
+const operatorInput = document.querySelector("#operator-name-input");
 const sidebarToggleButton = document.querySelector("#sidebar-toggle-button");
 const viewButtons = Array.from(document.querySelectorAll("[data-view]"));
 const projectSelect = document.querySelector("#project-select");
@@ -30,10 +36,42 @@ const helperText = document.querySelector("#helper-text");
 const shortcutText = document.querySelector("#sidebar-shortcut-text");
 const controlsPanel = document.querySelector("#controls-panel");
 const exportPanel = document.querySelector("#export-panel");
+const auditPanel = document.querySelector("#audit-panel");
+const snapshotPanel = document.querySelector("#snapshot-panel");
 const tableWrap = document.querySelector(".table-wrap");
 const toolbar = document.querySelector("#structure-toolbar");
 const selectionPill = document.querySelector(".head-pill--selection");
 const TREE_INDENT_STEP = 16;
+const DEFAULT_OPERATOR_NAME = "Usuario local";
+const METRADO_TYPE_OPTIONS = ["Tradicional", "Revit"];
+const UNIDAD_PARTIDA_OPTIONS = [
+  "und",
+  "m",
+  "ml",
+  "m2",
+  "m3",
+  "cm",
+  "km",
+  "kg",
+  "g",
+  "tn",
+  "l",
+  "ha",
+  "h",
+  "dia",
+  "mes",
+  "pza",
+  "jgo",
+  "glb",
+  "lote",
+  "paquete",
+];
+const AUDIT_FILTER_CONFIGS = {
+  all: { label: "Todos" },
+  today: { label: "Hoy" },
+  structure: { label: "Estructura" },
+  cost: { label: "Costo/Metrados" },
+};
 const VIEW_CONFIGS = {
   itemizado: {
     key: "itemizado",
@@ -76,14 +114,26 @@ const VIEW_CONFIGS = {
         placeholder: "Describe la partida o subpartida",
       },
       {
+        key: "tipoMetrado",
+        label: "Tipo de metrado",
+        colClass: "col-tipo-metrado",
+        widthVar: "--tipo-metrado-col-width",
+        type: "select",
+        field: "tipoMetrado",
+        editable: true,
+        placeholder: "Selecciona",
+        options: METRADO_TYPE_OPTIONS,
+      },
+      {
         key: "unidad",
         label: "Unidad de Partida",
         colClass: "col-unidad",
         widthVar: "--unidad-col-width",
-        type: "input",
+        type: "select",
         field: "unidad",
         editable: true,
-        placeholder: "m2, ml, und...",
+        placeholder: "Selecciona",
+        options: UNIDAD_PARTIDA_OPTIONS,
       },
       {
         key: "costo",
@@ -105,9 +155,9 @@ const VIEW_CONFIGS = {
     contentType: "table",
     searchEnabled: true,
     helperText:
-      "Aqui editas solo el metrado tradicional sin alterar la estructura del itemizado.",
+      "Aqui editas el presupuesto y revisas metrados y parciales directamente sobre la matriz.",
     shortcutText:
-      "En esta vista solo editas el metrado tradicional; el resto queda fijo.",
+      "Usa el buscador superior para ubicar partidas y revisar rapidamente los importes del presupuesto.",
     allowsStructureEditing: false,
     columns: [
       {
@@ -143,10 +193,11 @@ const VIEW_CONFIGS = {
         label: "Unidad de Partida",
         colClass: "col-unidad",
         widthVar: "--unidad-col-width",
-        type: "input",
+        type: "select",
         field: "unidad",
         editable: false,
-        placeholder: "m2, ml, und...",
+        placeholder: "",
+        options: UNIDAD_PARTIDA_OPTIONS,
       },
       {
         key: "costo",
@@ -190,6 +241,99 @@ const VIEW_CONFIGS = {
       },
     ],
   },
+  auditoria: {
+    key: "auditoria",
+    label: "Auditoría",
+    matrixTitle: "Auditoría",
+    contentType: "audit",
+    searchEnabled: true,
+    helperText:
+      "Selecciona una fila para revisar su historial de cambios, responsable y fecha.",
+    shortcutText:
+      "Esta vista es solo de lectura y muestra el seguimiento completo de cada fila.",
+    allowsStructureEditing: false,
+    columns: [
+      {
+        key: "partida",
+        label: "Codigo de partida",
+        colClass: "col-partida",
+        widthVar: "--partida-col-width",
+        type: "partida",
+      },
+      {
+        key: "codificacion",
+        label: "Codificacion",
+        colClass: "col-codificacion",
+        widthVar: "--codificacion-col-width",
+        type: "input",
+        field: "codificacion",
+        editable: false,
+        placeholder: "",
+      },
+      {
+        key: "descripcion",
+        label: "Descripcion de Partida",
+        colClass: "col-descripcion",
+        widthVar: "--descripcion-col-width",
+        type: "input",
+        field: "descripcion",
+        editable: false,
+        inputClass: "cell-field--descripcion",
+        placeholder: "",
+      },
+      {
+        key: "unidad",
+        label: "Unidad de Partida",
+        colClass: "col-unidad",
+        widthVar: "--unidad-col-width",
+        type: "select",
+        field: "unidad",
+        editable: false,
+        placeholder: "",
+        options: UNIDAD_PARTIDA_OPTIONS,
+      },
+      {
+        key: "costo",
+        label: "Costo",
+        colClass: "col-costo",
+        widthVar: "--costo-col-width",
+        type: "input",
+        field: "costo",
+        editable: false,
+        placeholder: "",
+        inputMode: "decimal",
+      },
+      {
+        key: "metradoTradicional",
+        label: "Metrado Tradicional",
+        colClass: "col-metrado-tradicional",
+        widthVar: "--metrado-tradicional-col-width",
+        type: "input",
+        field: "metradoTradicional",
+        editable: false,
+        placeholder: "",
+        inputMode: "decimal",
+      },
+      {
+        key: "metradoBim",
+        label: "Metrado BIM",
+        colClass: "col-metrado-bim",
+        widthVar: "--metrado-bim-col-width",
+        type: "input",
+        field: "metradoBim",
+        editable: false,
+        placeholder: "",
+        inputMode: "decimal",
+      },
+      {
+        key: "parcial",
+        label: "Parcial",
+        colClass: "col-parcial",
+        widthVar: "--parcial-col-width",
+        type: "partial",
+      },
+    ],
+  },
   "exportaciones-rvt": {
     key: "exportaciones-rvt",
     label: "Exportaciones para RVT",
@@ -197,7 +341,7 @@ const VIEW_CONFIGS = {
     contentType: "export",
     searchEnabled: false,
     helperText:
-      "Cada boton exporta una raiz completa a un archivo Excel con codificacion, codigo, descripcion, unidad y costo.",
+      "Cada boton exporta solo filas con Tipo de metrado = Revit a un archivo Excel con codificacion, codigo, descripcion, unidad, costo y Grupo Tablas.",
     shortcutText:
       "Usa un boton por cada raiz para generar su archivo Excel listo para revision o intercambio.",
     allowsStructureEditing: false,
@@ -211,14 +355,32 @@ const state = {
   projects: storedProjectsState.projects,
   currentProjectId: storedProjectsState.currentProjectId,
   rows: [],
+  auditEntries: [],
+  snapshots: [],
+  snapshotCompareBaseId: null,
+  snapshotCompareTargetId: null,
   selectedId: null,
   pendingFocus: null,
   filterQuery: "",
   collapsedIds: new Set(),
   dragSession: null,
+  editStartValues: {},
+  operatorName: sanitizeOperatorName(uiState.operatorName || DEFAULT_OPERATOR_NAME),
+  auditFilter: AUDIT_FILTER_CONFIGS[uiState.auditFilter] ? uiState.auditFilter : "all",
   currentView: VIEW_CONFIGS[uiState.currentView] ? uiState.currentView : "itemizado",
   sidebarCollapsed: uiState.sidebarCollapsed !== false,
+  storageMode: "local-cache",
+  isHydratingRemote: false,
+  isSavingRemote: false,
+  remoteSaveError: false,
   lastSavedAt: null,
+};
+
+const persistence = {
+  bootstrapped: false,
+  remoteAvailable: false,
+  saveTimerId: null,
+  saveInFlight: null,
 };
 
 hydrateCurrentProject(false);
@@ -229,6 +391,7 @@ applySidebarState();
 persistUiState();
 saveProjectState(false);
 updateSaveStatus();
+operatorInput.value = state.operatorName;
 render();
 
 toolbar.addEventListener("click", (event) => {
@@ -247,6 +410,33 @@ exportPanel.addEventListener("click", (event) => {
   }
 
   exportRootBranch(button.dataset.exportRootId);
+});
+
+auditPanel.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-audit-filter]");
+  if (!button) {
+    return;
+  }
+
+  setAuditFilter(button.dataset.auditFilter);
+});
+
+snapshotPanel.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-snapshot-action]");
+  if (!button) {
+    return;
+  }
+
+  handleSnapshotAction(button.dataset.snapshotAction, button.dataset.snapshotId);
+});
+
+snapshotPanel.addEventListener("change", (event) => {
+  const target = event.target.closest("[data-snapshot-compare]");
+  if (!target) {
+    return;
+  }
+
+  updateSnapshotComparison(target.dataset.snapshotCompare, target.value);
 });
 
 body.addEventListener("pointerdown", (event) => {
@@ -286,6 +476,7 @@ body.addEventListener("focusin", (event) => {
   }
 
   selectRow(rowElement.dataset.rowId);
+  captureEditStartValue(event.target, rowElement.dataset.rowId);
 });
 
 body.addEventListener("input", (event) => {
@@ -305,6 +496,11 @@ body.addEventListener("input", (event) => {
 
   if (!isFieldEditable(field)) {
     event.target.value = row[field] ?? "";
+    return;
+  }
+
+  if (isLeafOnlyField(field) && rowHasChildren(state.rows, getRowIndexById(row.id))) {
+    event.target.value = "";
     return;
   }
 
@@ -329,7 +525,7 @@ body.addEventListener("input", (event) => {
     updateDescriptionColumnWidth();
   }
 
-  updatePartialCell(row.id);
+  updateVisiblePartialCells();
   refreshMetrics();
 });
 
@@ -337,7 +533,7 @@ body.addEventListener("change", (event) => {
   const field = event.target.name;
   const rowElement = event.target.closest("tr[data-row-id]");
 
-  if (!["codificacion", "descripcion"].includes(field) || !rowElement) {
+  if (!isAuditableField(field) || !rowElement) {
     return;
   }
 
@@ -353,45 +549,59 @@ body.addEventListener("change", (event) => {
     return;
   }
 
-  const nextValue =
-    field === "codificacion"
-      ? sanitizeCodificacion(event.target.value)
-      : sanitizeDescripcion(event.target.value);
+  if (isLeafOnlyField(field) && rowHasChildren(state.rows, getRowIndexById(row.id))) {
+    event.target.value = "";
+    clearEditStartValue(row.id, field);
+    return;
+  }
+
+  const nextValue = sanitizeFieldValue(field, event.target.value);
+  const beforeValue = getEditStartValue(row.id, field, row[field] ?? "");
   event.target.value = nextValue;
 
-  const duplicate =
-    field === "codificacion"
-      ? findDuplicateCodificacion(nextValue, row.id)
-      : findDuplicateDescripcion(nextValue, row.id);
+  const duplicate = findDuplicateForField(field, nextValue, row.id);
 
   if (duplicate) {
-    event.target.value = row.codificacion ?? "";
-    if (field === "descripcion") {
-      event.target.value = row.descripcion ?? "";
-    }
+    event.target.value = row[field] ?? "";
 
     event.target.setCustomValidity(getDuplicateFieldMessage(field, duplicate.code));
     event.target.reportValidity();
+    clearEditStartValue(row.id, field);
     return;
   }
 
-  if (nextValue === row[field]) {
+  if (nextValue !== row[field]) {
+    row[field] = nextValue;
+    saveRows(state.rows, false);
+  }
+
+  clearEditStartValue(row.id, field);
+
+  if (nextValue === beforeValue) {
     return;
   }
 
-  row[field] = nextValue;
-  saveRows(state.rows);
+  appendAuditEntries([
+    createFieldAuditEntry(row.id, field, beforeValue, nextValue),
+  ]);
 
   if (field === "descripcion") {
     updateDescriptionColumnWidth();
   }
 
+  updateVisiblePartialCells();
   refreshMetrics();
 });
 
 searchInput.addEventListener("input", (event) => {
   state.filterQuery = event.target.value.trim();
   render();
+});
+
+operatorInput.addEventListener("change", (event) => {
+  state.operatorName = sanitizeOperatorName(event.target.value || DEFAULT_OPERATOR_NAME);
+  event.target.value = state.operatorName;
+  persistUiState();
 });
 
 viewButtons.forEach((button) => {
@@ -416,6 +626,10 @@ deleteProjectButton.addEventListener("click", () => {
   deleteCurrentProject();
 });
 
+saveSnapshotButton.addEventListener("click", () => {
+  createBudgetSnapshot();
+});
+
 sidebarToggleButton.addEventListener("click", () => {
   state.sidebarCollapsed = !state.sidebarCollapsed;
   persistUiState();
@@ -430,6 +644,8 @@ window.addEventListener("resize", () => {
     applyTreeDragFeedback();
   }
 });
+
+bootstrapServerPersistence();
 
 function handleAction(action) {
   if (!getCurrentViewConfig().allowsStructureEditing) {
@@ -533,17 +749,39 @@ function handleAction(action) {
 }
 
 function commit(rows, selectedId, focusField) {
-  state.rows = normalizeRows(rows);
+  const previousRows = cloneRows(state.rows);
+  const nextRows = normalizeRows(rows);
+  const structureEntries = collectStructureAuditEntries(previousRows, nextRows);
+
+  state.rows = nextRows;
   pruneCollapsedIds();
   state.selectedId = selectedId;
   state.pendingFocus = focusField ? { id: selectedId, field: focusField } : null;
   persistUiState();
-  saveRows(state.rows);
+  saveRows(state.rows, structureEntries.length === 0);
+
+  if (structureEntries.length > 0) {
+    appendAuditEntries(structureEntries);
+  }
+
   render();
 }
 
 function getCurrentViewConfig() {
   return VIEW_CONFIGS[state.currentView] || VIEW_CONFIGS.itemizado;
+}
+
+function setAuditFilter(filterKey) {
+  if (!AUDIT_FILTER_CONFIGS[filterKey] || filterKey === state.auditFilter) {
+    return;
+  }
+
+  state.auditFilter = filterKey;
+  persistUiState();
+
+  if (getCurrentViewConfig().contentType === "audit") {
+    renderAuditPanel(buildPartidaCodes(state.rows));
+  }
 }
 
 function switchView(view) {
@@ -560,7 +798,10 @@ function switchView(view) {
 
 function render() {
   const viewConfig = getCurrentViewConfig();
-  const filterQuery = viewConfig.contentType === "table" ? state.filterQuery : "";
+  const filterQuery =
+    viewConfig.contentType === "table" || viewConfig.contentType === "audit"
+      ? state.filterQuery
+      : "";
   const partidaCodes = buildPartidaCodes(state.rows);
   const visibleEntries = getVisibleEntries(
     state.rows,
@@ -574,10 +815,14 @@ function render() {
   if (viewConfig.contentType === "export") {
     tableWrap.hidden = true;
     exportPanel.hidden = false;
+    auditPanel.hidden = true;
+    snapshotPanel.hidden = true;
     renderExportPanel(partidaCodes);
   } else {
     exportPanel.hidden = true;
     tableWrap.hidden = false;
+    auditPanel.hidden = viewConfig.contentType !== "audit";
+    snapshotPanel.hidden = true;
     renderTableStructure(viewConfig);
 
     if (visibleEntries.length === 0) {
@@ -600,25 +845,29 @@ function render() {
 
           return `
             <tr data-row-id="${row.id}" class="${isSelected ? "is-selected" : ""}" title="${escapeHtml(selectedLabel)}">
-              ${renderRowCells(viewConfig, { row, index, code })}
+              ${renderRowCells(viewConfig, { row, index, code, codes: partidaCodes })}
             </tr>
           `;
         })
         .join("");
     }
+
+    if (viewConfig.contentType === "audit") {
+      renderAuditPanel(partidaCodes);
+    }
   }
 
   updateProjectUi();
   updateViewUi(viewConfig);
-  if (viewConfig.contentType === "table") {
+  if (viewConfig.contentType === "table" || viewConfig.contentType === "audit") {
     updateDescriptionColumnWidth(visibleEntries);
   }
   refreshMetrics(partidaCodes, visibleEntries);
-  if (viewConfig.contentType === "table") {
+  if (viewConfig.contentType === "table" || viewConfig.contentType === "audit") {
     updateSelectionUi();
   }
   updateToolbarState();
-  if (viewConfig.contentType === "table") {
+  if (viewConfig.contentType === "table" || viewConfig.contentType === "audit") {
     restoreFocus();
   }
 }
@@ -650,9 +899,11 @@ function renderColumnCell(column, context, viewConfig) {
     case "partida":
       return renderPartidaCell(row, index, code, viewConfig);
     case "partial":
-      return renderPartialCell(row);
+      return renderPartialCell(row, index);
     case "input":
-      return renderInputCell(row, column);
+      return renderInputCell(row, column, index, context);
+    case "select":
+      return renderSelectCell(row, column, index, context);
     default:
       return "<td></td>";
   }
@@ -697,13 +948,13 @@ function renderPartidaCell(row, index, code, viewConfig) {
   `;
 }
 
-function renderInputCell(row, column) {
+function renderInputCell(row, column, rowIndex, context = {}) {
   const classes = ["cell-field"];
   if (column.inputClass) {
     classes.push(column.inputClass);
   }
 
-  const isEditable = isColumnEditable(column);
+  const isEditable = isCellEditable(row, rowIndex, column);
   if (!isEditable) {
     classes.push("cell-field--readonly");
   }
@@ -711,8 +962,9 @@ function renderInputCell(row, column) {
   const inputMode = column.inputMode
     ? ` inputmode="${column.inputMode}"`
     : "";
-  const value = escapeHtml(row[column.field] ?? "");
-  const placeholder = escapeHtml(column.placeholder || "");
+  const displayValue = getDisplayValueForCell(row, rowIndex, column, context.codes);
+  const value = escapeHtml(displayValue);
+  const placeholder = escapeHtml(getPlaceholderForCell(rowIndex, column));
   const readOnlyAttributes = isEditable
     ? ""
     : ' readonly tabindex="-1" aria-readonly="true"';
@@ -730,11 +982,54 @@ function renderInputCell(row, column) {
   `;
 }
 
-function renderPartialCell(row) {
-  const partial = getRowPartial(row);
+function renderSelectCell(row, column, rowIndex, context = {}) {
+  const classes = ["cell-field"];
+  const isEditable = isCellEditable(row, rowIndex, column);
+  const displayValue = getDisplayValueForCell(row, rowIndex, column, context.codes);
+  const options = Array.isArray(column.options) ? column.options : [];
+  const shouldRenderCustomValue = Boolean(displayValue) && !options.includes(displayValue);
+  const renderedOptions = [
+    ...(shouldRenderCustomValue ? [displayValue] : []),
+    ...options,
+  ];
+
+  if (!isEditable) {
+    classes.push("cell-field--readonly", "cell-field--display");
+
+    return `
+      <td>
+        <div class="${classes.join(" ")}">${escapeHtml(displayValue)}</div>
+      </td>
+    `;
+  }
+
+  classes.push("cell-field--select");
 
   return `
-    <td class="partial-cell ${partial === 0 ? "is-empty" : ""}">
+    <td>
+      <select
+        class="${classes.join(" ")}"
+        name="${column.field}"
+        aria-label="${escapeHtml(column.label)}"
+      >
+        <option value="">${escapeHtml(column.placeholder || "Selecciona")}</option>
+        ${renderedOptions
+          .map((option) => {
+            const selected = option === displayValue ? " selected" : "";
+            return `<option value="${escapeHtml(option)}"${selected}>${escapeHtml(option)}</option>`;
+          })
+          .join("")}
+      </select>
+    </td>
+  `;
+}
+
+function renderPartialCell(row, rowIndex) {
+  const partial = getRowPartialAtIndex(rowIndex);
+  const isSubtotal = rowHasChildren(state.rows, rowIndex);
+
+  return `
+    <td class="partial-cell ${partial === 0 ? "is-empty" : ""} ${isSubtotal ? "partial-cell--subtotal" : ""}">
       ${formatAmount(partial)}
     </td>
   `;
@@ -781,8 +1076,707 @@ function renderExportPanel(codes) {
   `;
 }
 
+function renderAuditPanel(codes) {
+  const selectedIndex = getSelectedIndex();
+  const selectedRow = state.rows[selectedIndex];
+  const selectedPartidaCode = selectedIndex >= 0 ? codes[selectedIndex] : "";
+
+  if (!selectedRow) {
+    auditPanel.innerHTML = `
+      <div class="audit-entry-empty">
+        <strong>Selecciona una fila</strong>
+        <p>Elige una partida de la matriz para ver su seguimiento.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const entries = state.auditEntries
+    .filter((entry) => entry.rowId === selectedRow.id)
+    .filter((entry) => doesAuditEntryMatchFilter(entry, state.auditFilter))
+    .slice()
+    .sort((left, right) => new Date(right.timestamp) - new Date(left.timestamp));
+  const title = selectedRow.descripcion.trim() || selectedRow.codificacion.trim() || selectedPartidaCode;
+
+  auditPanel.innerHTML = `
+    <div class="audit-panel-head">
+      <div class="audit-panel-title">
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(selectedPartidaCode)}${selectedRow.codificacion ? ` | ${escapeHtml(selectedRow.codificacion)}` : ""}</span>
+      </div>
+      <div class="audit-filter-row" role="group" aria-label="Filtros de auditoria">
+        ${renderAuditFilterButtons()}
+      </div>
+    </div>
+    ${
+      entries.length === 0
+        ? `
+          <div class="audit-entry-empty">
+            <strong>${getAuditEmptyTitle()}</strong>
+            <p>Esta fila todavía no registra movimientos ni ediciones en el historial.</p>
+          </div>
+        `
+        : `
+          <div class="audit-entry-list">
+            ${entries.map((entry) => renderAuditEntry(entry)).join("")}
+          </div>
+        `
+    }
+  `;
+}
+
+function renderAuditFilterButtons() {
+  return Object.entries(AUDIT_FILTER_CONFIGS)
+    .map(([key, config]) => {
+      const activeClass = key === state.auditFilter ? " is-active" : "";
+      return `
+        <button
+          type="button"
+          class="audit-filter-button${activeClass}"
+          data-audit-filter="${key}"
+        >
+          ${escapeHtml(config.label)}
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function getAuditEmptyTitle() {
+  return state.auditFilter === "all"
+    ? "Sin cambios auditados"
+    : "Sin cambios para este filtro";
+}
+
+function doesAuditEntryMatchFilter(entry, filterKey) {
+  if (filterKey === "today") {
+    return isTimestampToday(entry.timestamp);
+  }
+
+  if (filterKey === "structure") {
+    return entry.type === "structure";
+  }
+
+  if (filterKey === "cost") {
+    return ["costo", "metradoTradicional", "metradoBim", "tipoMetrado"].includes(entry.field);
+  }
+
+  return true;
+}
+
+function isTimestampToday(timestamp) {
+  const entryDate = new Date(timestamp);
+  const now = new Date();
+
+  return (
+    entryDate.getFullYear() === now.getFullYear()
+    && entryDate.getMonth() === now.getMonth()
+    && entryDate.getDate() === now.getDate()
+  );
+}
+
+function renderAuditEntry(entry) {
+  return `
+    <article class="audit-entry-card">
+      <strong>${escapeHtml(getAuditEntryTitle(entry))}</strong>
+      <span class="audit-entry-meta">${escapeHtml(formatAuditEntryMeta(entry))}</span>
+      <p class="audit-entry-detail">${escapeHtml(getAuditEntryDetail(entry))}</p>
+    </article>
+  `;
+}
+
+function renderSnapshotPanel() {
+  const snapshots = state.snapshots
+    .slice()
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
+
+  snapshotPanel.innerHTML = `
+    <div class="snapshot-panel-head">
+      <div class="snapshot-panel-title">
+        <strong>Historial de fotos del presupuesto</strong>
+        <span>Las fotos quedan guardadas en la base local del proyecto para comparar versiones y seguir su evolucion.</span>
+      </div>
+      <span class="table-meta-pill">
+        <strong>${snapshots.length}</strong> fotos
+      </span>
+    </div>
+    ${renderSnapshotChartSection()}
+    ${renderSnapshotTimelineSection()}
+    ${renderSnapshotComparisonSection()}
+    ${
+      snapshots.length === 0
+        ? `
+          <div class="audit-entry-empty">
+            <strong>Aun no hay fotos guardadas</strong>
+            <p>Usa el boton Guardar foto para congelar una version historica del presupuesto actual y habilitar la curva de evolucion.</p>
+          </div>
+        `
+        : `
+          <div class="snapshot-grid">
+            ${snapshots.map((snapshot) => renderSnapshotCard(snapshot)).join("")}
+          </div>
+        `
+    }
+  `;
+}
+
+function renderSnapshotCard(snapshot) {
+  const summary = snapshot.summary || buildSnapshotSummary(snapshot.rows);
+  const previousSnapshot = getPreviousSnapshot(snapshot.id);
+  const previousSummary = previousSnapshot
+    ? previousSnapshot.summary || buildSnapshotSummary(previousSnapshot.rows)
+    : null;
+  const totalDelta = previousSummary
+    ? summary.grandTotal - previousSummary.grandTotal
+    : null;
+
+  return `
+    <article class="snapshot-card">
+      <div class="snapshot-card-head">
+        <div class="snapshot-card-title">
+          <strong>${escapeHtml(snapshot.name)}</strong>
+          <span>${escapeHtml(formatSnapshotMeta(snapshot))}</span>
+        </div>
+        <span class="snapshot-card-date">${escapeHtml(formatSnapshotDate(snapshot.createdAt))}</span>
+      </div>
+      <div class="snapshot-card-stats">
+        <span class="snapshot-stat-pill">
+          <span>Total</span>
+          <strong>${escapeHtml(formatAmount(summary.grandTotal))}</strong>
+        </span>
+        <span class="snapshot-stat-pill">
+          <span>Partidas</span>
+          <strong>${summary.rowCount}</strong>
+        </span>
+        <span class="snapshot-stat-pill">
+          <span>Raices</span>
+          <strong>${summary.rootCount}</strong>
+        </span>
+        <span class="snapshot-stat-pill">
+          <span>Metrado trad.</span>
+          <strong>${escapeHtml(formatAmount(summary.metradoTradicionalTotal))}</strong>
+        </span>
+        <span class="snapshot-stat-pill ${getDeltaToneClass(totalDelta)}">
+          <span>Vs anterior</span>
+          <strong>${escapeHtml(totalDelta === null ? "Base" : formatSignedAmount(totalDelta))}</strong>
+        </span>
+      </div>
+      <div class="snapshot-card-actions">
+        <button
+          type="button"
+          class="topbar-button"
+          data-snapshot-action="compare-current"
+          data-snapshot-id="${snapshot.id}"
+        >
+          Comparar con actual
+        </button>
+        <button
+          type="button"
+          class="topbar-button"
+          data-snapshot-action="download"
+          data-snapshot-id="${snapshot.id}"
+        >
+          Descargar JSON
+        </button>
+        <button
+          type="button"
+          class="topbar-button topbar-button--danger"
+          data-snapshot-action="delete"
+          data-snapshot-id="${snapshot.id}"
+        >
+          Eliminar
+        </button>
+      </div>
+    </article>
+  `;
+}
+
+function renderSnapshotChartSection() {
+  const versions = getBudgetTimelineVersions();
+  if (versions.length === 0) {
+    return "";
+  }
+
+  if (versions.length < 2) {
+    const currentVersion = versions[0];
+
+    return `
+      <section class="snapshot-section snapshot-section--chart">
+        <div class="snapshot-section-head">
+          <strong>Grafico de evolucion</strong>
+          <span>El grafico aparece en cuanto tengas al menos una foto guardada para compararla contra el presupuesto actual.</span>
+        </div>
+        <div class="snapshot-chart-empty">
+          <strong>Aun no hay suficientes versiones para trazar la curva</strong>
+          <p>Presiona <strong>Guardar foto</strong> en Presupuesto y la evolucion se dibujara aqui automaticamente.</p>
+          <span class="snapshot-summary-pill">
+            <strong>Actual</strong>
+            ${escapeHtml(formatAmount(currentVersion.summary.grandTotal))}
+          </span>
+        </div>
+      </section>
+    `;
+  }
+
+  const geometry = buildSnapshotChartGeometry(versions);
+
+  return `
+    <section class="snapshot-section snapshot-section--chart">
+      <div class="snapshot-section-head">
+        <strong>Grafico de evolucion</strong>
+        <span>La curva usa las fotos guardadas y el presupuesto actual para mostrar como crece o baja el total.</span>
+      </div>
+      <div class="snapshot-chart-wrap">
+        <svg class="snapshot-chart" viewBox="0 0 ${geometry.width} ${geometry.height}" role="img" aria-label="Grafico historico del presupuesto">
+          ${geometry.gridLines
+            .map((gridLine) => `
+              <line
+                x1="${gridLine.x1}"
+                y1="${gridLine.y1}"
+                x2="${gridLine.x2}"
+                y2="${gridLine.y2}"
+                class="snapshot-chart-grid"
+              ></line>
+            `)
+            .join("")}
+          <path class="snapshot-chart-area" d="${geometry.areaPath}"></path>
+          <path class="snapshot-chart-line" d="${geometry.linePath}"></path>
+          ${geometry.points
+            .map((point) => `
+              <g class="snapshot-chart-point${point.isCurrent ? " is-current" : ""}">
+                <circle cx="${point.x}" cy="${point.y}" r="4.5"></circle>
+                <title>${escapeHtml(point.label)} | ${escapeHtml(point.dateLabel)} | ${escapeHtml(formatAmount(point.total))}</title>
+              </g>
+            `)
+            .join("")}
+        </svg>
+      </div>
+      <div class="snapshot-chart-legend">
+        ${geometry.points
+          .map((point) => `
+            <span class="snapshot-summary-pill">
+              <strong>${escapeHtml(point.shortLabel)}</strong>
+              ${escapeHtml(formatAmount(point.total))}
+            </span>
+          `)
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderSnapshotTimelineSection() {
+  const versions = getBudgetTimelineVersions();
+  if (versions.length === 0) {
+    return "";
+  }
+
+  const maxTotal = versions.reduce((max, version) => {
+    return Math.max(max, version.summary.grandTotal);
+  }, 0);
+
+  return `
+    <section class="snapshot-section">
+      <div class="snapshot-section-head">
+        <strong>Serie historica local</strong>
+        <span>Cada version queda lista para graficar el crecimiento del presupuesto en el tiempo.</span>
+      </div>
+      <div class="snapshot-history-list">
+        ${versions
+          .map((version, index) => {
+            const previous = versions[index - 1] || null;
+            const delta = previous
+              ? version.summary.grandTotal - previous.summary.grandTotal
+              : null;
+            const width = maxTotal > 0
+              ? Math.max(6, (version.summary.grandTotal / maxTotal) * 100)
+              : 6;
+
+            return renderSnapshotTimelineItem(version, delta, width);
+          })
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderSnapshotTimelineItem(version, delta, width) {
+  return `
+    <article class="snapshot-history-item${version.id === "current" ? " is-current" : ""}">
+      <div class="snapshot-history-row">
+        <div class="snapshot-history-copy">
+          <strong>${escapeHtml(getBudgetVersionLabel(version))}</strong>
+          <span>${escapeHtml(formatSnapshotDate(version.createdAt))}</span>
+        </div>
+        <div class="snapshot-history-total">
+          <strong>${escapeHtml(formatAmount(version.summary.grandTotal))}</strong>
+          <span class="${getDeltaToneClass(delta)}">${escapeHtml(delta === null ? "Punto inicial" : formatSignedAmount(delta))}</span>
+        </div>
+      </div>
+      <div class="snapshot-history-bar">
+        <span style="width: ${Math.min(width, 100).toFixed(2)}%"></span>
+      </div>
+    </article>
+  `;
+}
+
+function buildSnapshotChartGeometry(versions) {
+  const width = 760;
+  const height = 240;
+  const padding = {
+    top: 20,
+    right: 24,
+    bottom: 32,
+    left: 24,
+  };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const totals = versions.map((version) => version.summary.grandTotal);
+  const maxTotal = Math.max(...totals, 1);
+  const pointCount = Math.max(versions.length - 1, 1);
+
+  const points = versions.map((version, index) => {
+    const x = padding.left + (plotWidth * index) / pointCount;
+    const y = padding.top + plotHeight - ((version.summary.grandTotal / maxTotal) * plotHeight);
+    return {
+      x: Number(x.toFixed(2)),
+      y: Number(y.toFixed(2)),
+      total: version.summary.grandTotal,
+      label: getBudgetVersionLabel(version),
+      shortLabel: version.id === "current" ? "Actual" : `V${version.versionNumber}`,
+      dateLabel: formatSnapshotDate(version.createdAt),
+      isCurrent: version.id === "current",
+    };
+  });
+
+  const linePath = points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+    .join(" ");
+  const areaPath = `${linePath} L ${points[points.length - 1].x} ${height - padding.bottom} L ${points[0].x} ${height - padding.bottom} Z`;
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+    const y = padding.top + plotHeight - (plotHeight * ratio);
+    return {
+      x1: padding.left,
+      y1: Number(y.toFixed(2)),
+      x2: width - padding.right,
+      y2: Number(y.toFixed(2)),
+    };
+  });
+
+  return {
+    width,
+    height,
+    linePath,
+    areaPath,
+    gridLines,
+    points,
+  };
+}
+
+function renderSnapshotComparisonSection() {
+  const options = getBudgetVersionOptions();
+  if (options.length < 2) {
+    return `
+      <section class="snapshot-section">
+        <div class="snapshot-section-head">
+          <strong>Comparacion de versiones</strong>
+          <span>Guarda al menos una foto para habilitar comparacion contra el presupuesto actual.</span>
+        </div>
+      </section>
+    `;
+  }
+
+  ensureSnapshotComparisonSelection();
+
+  const baseVersion = findBudgetVersionById(state.snapshotCompareBaseId);
+  const targetVersion = findBudgetVersionById(state.snapshotCompareTargetId);
+
+  if (!baseVersion || !targetVersion || baseVersion.id === targetVersion.id) {
+    return `
+      <section class="snapshot-section">
+        <div class="snapshot-section-head">
+          <strong>Comparacion de versiones</strong>
+          <span>Elige dos versiones distintas para revisar diferencias.</span>
+        </div>
+      </section>
+    `;
+  }
+
+  const comparison = buildBudgetComparison(baseVersion, targetVersion);
+  const visibleChanges = comparison.changes.slice(0, 8);
+  const hiddenChangesCount = Math.max(comparison.changes.length - visibleChanges.length, 0);
+
+  return `
+    <section class="snapshot-section snapshot-section--compare">
+      <div class="snapshot-section-head">
+        <strong>Comparacion de versiones</strong>
+        <span>${escapeHtml(getBudgetVersionLabel(baseVersion))} -> ${escapeHtml(getBudgetVersionLabel(targetVersion))}</span>
+      </div>
+      <div class="snapshot-compare-controls">
+        <label class="snapshot-compare-field">
+          <span>Base</span>
+          <select class="snapshot-compare-select" data-snapshot-compare="base">
+            ${renderBudgetVersionOptions(options, state.snapshotCompareBaseId)}
+          </select>
+        </label>
+        <label class="snapshot-compare-field">
+          <span>Objetivo</span>
+          <select class="snapshot-compare-select" data-snapshot-compare="target">
+            ${renderBudgetVersionOptions(options, state.snapshotCompareTargetId)}
+          </select>
+        </label>
+      </div>
+      <div class="snapshot-card-stats">
+        ${renderComparisonStatPill("Delta total", formatSignedAmount(comparison.deltas.grandTotal), comparison.deltas.grandTotal)}
+        ${renderComparisonStatPill("Variacion", formatSignedPercent(comparison.deltaPercent), comparison.deltaPercent)}
+        ${renderComparisonStatPill("Metrado trad.", formatSignedAmount(comparison.deltas.metradoTradicionalTotal), comparison.deltas.metradoTradicionalTotal)}
+        ${renderComparisonStatPill("Metrado BIM", formatSignedAmount(comparison.deltas.metradoBimTotal), comparison.deltas.metradoBimTotal)}
+        ${renderComparisonStatPill("Partidas", formatSignedInteger(comparison.deltas.rowCount), comparison.deltas.rowCount)}
+      </div>
+      <div class="snapshot-compare-summary">
+        <span class="snapshot-summary-pill">Agregadas: <strong>${comparison.counts.added}</strong></span>
+        <span class="snapshot-summary-pill">Eliminadas: <strong>${comparison.counts.removed}</strong></span>
+        <span class="snapshot-summary-pill">Editadas: <strong>${comparison.counts.updated}</strong></span>
+        <span class="snapshot-summary-pill">Total base: <strong>${escapeHtml(formatAmount(comparison.baseSummary.grandTotal))}</strong></span>
+        <span class="snapshot-summary-pill">Total objetivo: <strong>${escapeHtml(formatAmount(comparison.targetSummary.grandTotal))}</strong></span>
+      </div>
+      ${
+        visibleChanges.length === 0
+          ? `
+            <div class="audit-entry-empty">
+              <strong>Sin cambios directos detectados</strong>
+              <p>No hay partidas agregadas, eliminadas ni editadas entre estas dos versiones.</p>
+            </div>
+          `
+          : `
+            <div class="snapshot-change-list">
+              ${visibleChanges.map((change) => renderSnapshotChangeCard(change)).join("")}
+            </div>
+            ${
+              hiddenChangesCount > 0
+                ? `<p class="snapshot-more-note">Quedan ${hiddenChangesCount} cambios adicionales fuera del resumen rapido.</p>`
+                : ""
+            }
+          `
+      }
+    </section>
+  `;
+}
+
+function renderBudgetVersionOptions(options, selectedId) {
+  return options
+    .map((option) => {
+      const selected = option.id === selectedId ? " selected" : "";
+      return `<option value="${option.id}"${selected}>${escapeHtml(getBudgetVersionLabel(option))}</option>`;
+    })
+    .join("");
+}
+
+function renderComparisonStatPill(label, value, deltaValue) {
+  return `
+    <span class="snapshot-stat-pill ${getDeltaToneClass(deltaValue)}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </span>
+  `;
+}
+
+function renderSnapshotChangeCard(change) {
+  return `
+    <article class="snapshot-change-card">
+      <strong>${escapeHtml(change.title)}</strong>
+      <span class="audit-entry-meta">${escapeHtml(change.meta)}</span>
+      <p class="audit-entry-detail">${escapeHtml(change.detail)}</p>
+    </article>
+  `;
+}
+
+function getAuditEntryTitle(entry) {
+  if (entry.type === "structure") {
+    return "Cambio de estructura";
+  }
+
+  return getFieldLabel(entry.field);
+}
+
+function getAuditEntryDetail(entry) {
+  if (entry.type === "structure") {
+    return `Nivel ${entry.beforeLevel} / ${entry.beforePartidaCode} -> Nivel ${entry.afterLevel} / ${entry.afterPartidaCode}`;
+  }
+
+  return `${formatAuditValue(entry.beforeValue)} -> ${formatAuditValue(entry.afterValue)}`;
+}
+
+function formatAuditEntryMeta(entry) {
+  const timestamp = new Date(entry.timestamp);
+  const dateLabel = timestamp.toLocaleString("es-PE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  return `${entry.userName} · ${dateLabel}`;
+}
+
+function formatSnapshotDate(timestamp) {
+  return new Date(timestamp).toLocaleString("es-PE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatSnapshotMeta(snapshot) {
+  const versionLabel = snapshot.versionNumber ? `V${snapshot.versionNumber}` : "Version";
+  return `${versionLabel} - ${snapshot.userName}`;
+}
+
+function formatAuditValue(value) {
+  const text = String(value ?? "").trim();
+  return text || "Vacío";
+}
+
 function isColumnEditable(column) {
-  return column.type === "input" && column.editable !== false;
+  return ["input", "select"].includes(column.type) && column.editable !== false;
+}
+
+function isCellEditable(row, rowIndex, column) {
+  if (!isColumnEditable(column)) {
+    return false;
+  }
+
+  if (!isLeafOnlyField(column.field)) {
+    return true;
+  }
+
+  return !rowHasChildren(state.rows, rowIndex);
+}
+
+function getDisplayValueForCell(row, rowIndex, column, codes = null) {
+  if (isLeafOnlyField(column.field) && rowHasChildren(state.rows, rowIndex)) {
+    return "";
+  }
+
+  return row[column.field] ?? "";
+}
+
+function getGrupoTablasForRow(rows, rowIndex, codes = null) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (rowIndex < 0 || rowIndex >= safeRows.length) {
+    return "";
+  }
+
+  const parentIndex = getParentIndex(safeRows, rowIndex);
+  if (parentIndex < 0) {
+    return "";
+  }
+
+  const resolvedCodes = Array.isArray(codes) ? codes : buildPartidaCodes(safeRows);
+  const parentCode = String(resolvedCodes[parentIndex] || "").trim();
+  const parentDescription = sanitizeDescripcion(safeRows[parentIndex]?.descripcion || "")
+    .trim()
+    .toUpperCase();
+
+  return [parentCode, parentDescription].filter(Boolean).join(" ").trim();
+}
+
+function getPlaceholderForCell(rowIndex, column) {
+  if (isLeafOnlyField(column.field) && rowHasChildren(state.rows, rowIndex)) {
+    return "";
+  }
+
+  return column.placeholder || "";
+}
+
+function isAuditableField(fieldName) {
+  return [
+    "codificacion",
+    "descripcion",
+    "unidad",
+    "costo",
+    "metradoTradicional",
+    "metradoBim",
+    "tipoMetrado",
+  ].includes(fieldName);
+}
+
+function captureEditStartValue(target, rowId) {
+  if (!target || !target.name || !isAuditableField(target.name)) {
+    return;
+  }
+
+  const row = state.rows.find((entry) => entry.id === rowId);
+  if (!row) {
+    return;
+  }
+
+  const key = getEditStartKey(rowId, target.name);
+  if (!(key in state.editStartValues)) {
+    state.editStartValues[key] = row[target.name] ?? "";
+  }
+}
+
+function getEditStartValue(rowId, fieldName, fallbackValue = "") {
+  const key = getEditStartKey(rowId, fieldName);
+  return key in state.editStartValues ? state.editStartValues[key] : fallbackValue;
+}
+
+function clearEditStartValue(rowId, fieldName) {
+  delete state.editStartValues[getEditStartKey(rowId, fieldName)];
+}
+
+function getEditStartKey(rowId, fieldName) {
+  return `${rowId}:${fieldName}`;
+}
+
+function sanitizeFieldValue(fieldName, value) {
+  if (fieldName === "codificacion") {
+    return sanitizeCodificacion(value);
+  }
+
+  if (fieldName === "descripcion") {
+    return sanitizeDescripcion(value);
+  }
+
+  if (fieldName === "unidad") {
+    return sanitizeUnidadPartida(value);
+  }
+
+  if (fieldName === "tipoMetrado") {
+    return sanitizeTipoMetrado(value);
+  }
+
+  return String(value ?? "");
+}
+
+function findDuplicateForField(fieldName, value, excludedRowId) {
+  if (fieldName === "codificacion") {
+    return findDuplicateCodificacion(value, excludedRowId);
+  }
+
+  if (fieldName === "descripcion") {
+    return findDuplicateDescripcion(value, excludedRowId);
+  }
+
+  return null;
+}
+
+function getFieldLabel(fieldName) {
+  const labels = {
+    codificacion: "Codificación",
+    descripcion: "Descripción de partida",
+    unidad: "Unidad de partida",
+    costo: "Costo",
+    metradoTradicional: "Metrado tradicional",
+    metradoBim: "Metrado BIM",
+    tipoMetrado: "Tipo de metrado",
+  };
+
+  return labels[fieldName] || fieldName;
 }
 
 function isFieldEditable(fieldName, viewConfig = getCurrentViewConfig()) {
@@ -808,9 +1802,7 @@ function refreshMetrics(
   const selectedRow = state.rows[selectedIndex];
 
   itemCount.textContent = String(rowCount);
-  grandTotal.textContent = formatAmount(
-    state.rows.reduce((sum, row) => sum + getRowPartial(row), 0),
-  );
+  grandTotal.textContent = formatAmount(getGrandTotalForRows(state.rows));
   depthCount.textContent = String(maxDepth);
   rootCount.textContent = String(rootRows);
   visibleCount.textContent = String(visibleRows);
@@ -918,6 +1910,10 @@ function selectRow(rowId) {
   updateSelectionUi();
   refreshMetrics();
   updateToolbarState();
+
+  if (getCurrentViewConfig().contentType === "audit") {
+    renderAuditPanel(buildPartidaCodes(state.rows));
+  }
 }
 
 function switchProject(projectId) {
@@ -956,6 +1952,7 @@ function createProject() {
     id: createId(),
     name,
     rows: [createRow()],
+    auditEntries: [],
     collapsedIds: [],
   });
 
@@ -1032,6 +2029,111 @@ function deleteCurrentProject() {
   render();
 }
 
+function createBudgetSnapshot() {
+  const currentProject = getCurrentProject();
+  if (!currentProject) {
+    return;
+  }
+
+  const suggestedName = getDefaultSnapshotName();
+  const input = window.prompt("Nombre de la foto del presupuesto", suggestedName);
+  if (input === null) {
+    return;
+  }
+
+  const name = sanitizeSnapshotName(input) || suggestedName;
+  const rows = cloneRows(state.rows);
+  const previousSnapshot = getLatestSnapshot();
+  const snapshot = {
+    id: createId(),
+    versionNumber: getNextSnapshotVersionNumber(),
+    name,
+    rows,
+    summary: buildSnapshotSummary(rows),
+    snapshotType: "manual",
+    baseSnapshotId: previousSnapshot ? previousSnapshot.id : null,
+    userName: state.operatorName,
+    createdAt: new Date().toISOString(),
+  };
+
+  state.snapshots = normalizeSnapshots([snapshot, ...state.snapshots]);
+  ensureSnapshotComparisonSelection();
+  saveProjectState();
+
+  if (state.currentView === "presupuesto") {
+    render();
+  }
+}
+
+function handleSnapshotAction(action, snapshotId) {
+  if (!action || !snapshotId) {
+    return;
+  }
+
+  if (action === "download") {
+    downloadSnapshot(snapshotId);
+    return;
+  }
+
+  if (action === "compare-current") {
+    setSnapshotComparison(snapshotId, "current");
+    return;
+  }
+
+  if (action === "delete") {
+    deleteSnapshot(snapshotId);
+  }
+}
+
+function downloadSnapshot(snapshotId) {
+  const snapshot = state.snapshots.find((entry) => entry.id === snapshotId);
+  const currentProject = getCurrentProject();
+  if (!snapshot || !currentProject) {
+    return;
+  }
+
+  const payload = {
+    projectId: currentProject.id,
+    projectName: currentProject.name,
+    snapshotId: snapshot.id,
+    snapshotName: snapshot.name,
+    versionNumber: snapshot.versionNumber || null,
+    baseSnapshotId: snapshot.baseSnapshotId || null,
+    createdAt: snapshot.createdAt,
+    userName: snapshot.userName,
+    summary: snapshot.summary || buildSnapshotSummary(snapshot.rows),
+    rows: cloneRows(snapshot.rows),
+  };
+  const fileLabel = sanitizeFilename(
+    `${currentProject.name} - ${snapshot.name}`,
+  ) || "foto-presupuesto";
+
+  downloadTextFile(
+    `${fileLabel}.json`,
+    JSON.stringify(payload, null, 2),
+    "application/json;charset=utf-8",
+  );
+}
+
+function deleteSnapshot(snapshotId) {
+  const snapshot = state.snapshots.find((entry) => entry.id === snapshotId);
+  if (!snapshot) {
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Se eliminara la foto "${snapshot.name}" del historial. Esta accion no se puede deshacer.`,
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  state.snapshots = state.snapshots.filter((entry) => entry.id !== snapshotId);
+  ensureSnapshotComparisonSelection();
+  saveProjectState();
+  render();
+}
+
 function hydrateCurrentProject(resetSelection) {
   let currentProject = getCurrentProject();
 
@@ -1040,6 +2142,7 @@ function hydrateCurrentProject(resetSelection) {
       id: createId(),
       name: "Proyecto 1",
       rows: [createRow()],
+      auditEntries: [],
       collapsedIds: [],
     });
     state.projects = [fallbackProject];
@@ -1048,6 +2151,10 @@ function hydrateCurrentProject(resetSelection) {
   }
 
   state.rows = cloneRows(currentProject.rows);
+  state.auditEntries = normalizeAuditEntries(currentProject.auditEntries);
+  state.snapshots = normalizeSnapshots(currentProject.snapshots);
+  ensureSnapshotComparisonSelection();
+  state.editStartValues = {};
   if (state.rows.length === 0) {
     state.rows = [createRow()];
   }
@@ -1088,6 +2195,7 @@ function updateViewUi(viewConfig = getCurrentViewConfig()) {
   searchWrap.hidden = !viewConfig.searchEnabled;
   searchInput.disabled = !viewConfig.searchEnabled;
   selectionPill.hidden = viewConfig.contentType === "export";
+  saveSnapshotButton.hidden = true;
   matrixTitle.textContent = viewConfig.matrixTitle;
   helperText.textContent = viewConfig.helperText;
   shortcutText.textContent = viewConfig.shortcutText;
@@ -1336,11 +2444,13 @@ function getVisibleEntries(rows, codes, filterQuery, options = {}) {
         entry.code,
         entry.row.codificacion,
         entry.row.descripcion,
+        getGrupoTablasForRow(rows, entry.index, codes),
         entry.row.unidad,
         entry.row.costo,
         entry.row.metrado,
         entry.row.metradoTradicional,
         entry.row.metradoBim,
+        entry.row.tipoMetrado,
       ].join(" "),
     );
 
@@ -1455,6 +2565,7 @@ function createRow(overrides = {}) {
     costo: "",
     metradoTradicional: "",
     metradoBim: "",
+    tipoMetrado: "",
     ...overrides,
   };
 }
@@ -1475,10 +2586,91 @@ function cloneRows(rows) {
       id: row.id || createId(),
       codificacion: sanitizeCodificacion(row.codificacion || ""),
       descripcion: sanitizeDescripcion(row.descripcion || ""),
+      unidad: sanitizeUnidadPartida(row.unidad || ""),
       metradoTradicional: row.metradoTradicional ?? row.metrado ?? "",
       metradoBim: row.metradoBim ?? "",
+      tipoMetrado: sanitizeTipoMetrado(row.tipoMetrado ?? ""),
     })),
   );
+}
+
+function normalizeAuditEntries(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && typeof entry === "object" && entry.rowId)
+    .map((entry) => ({
+      id: entry.id || createId(),
+      rowId: entry.rowId,
+      type: entry.type || "field",
+      field: entry.field || "",
+      beforeValue: entry.beforeValue ?? "",
+      afterValue: entry.afterValue ?? "",
+      beforeLevel: entry.beforeLevel ?? null,
+      afterLevel: entry.afterLevel ?? null,
+      beforePartidaCode: entry.beforePartidaCode ?? "",
+      afterPartidaCode: entry.afterPartidaCode ?? "",
+      userName: sanitizeOperatorName(entry.userName || DEFAULT_OPERATOR_NAME),
+      timestamp: entry.timestamp || new Date().toISOString(),
+    }));
+}
+
+function normalizeSnapshots(entries) {
+  const normalized = (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry, index) => {
+      const rows = cloneRows(entry.rows);
+      const normalizedRows = rows.length > 0 ? rows : [createRow()];
+      const parsedVersion = Number.parseInt(entry.versionNumber, 10);
+
+      return {
+        id: entry.id || createId(),
+        name: sanitizeSnapshotName(entry.name) || `Foto ${index + 1}`,
+        rows: normalizedRows,
+        summary: buildSnapshotSummary(normalizedRows),
+        userName: sanitizeOperatorName(entry.userName || DEFAULT_OPERATOR_NAME),
+        createdAt: entry.createdAt || new Date().toISOString(),
+        versionNumber: Number.isInteger(parsedVersion) && parsedVersion > 0
+          ? parsedVersion
+          : null,
+        snapshotType: entry.snapshotType === "manual" ? "manual" : "manual",
+        baseSnapshotId: typeof entry.baseSnapshotId === "string"
+          ? entry.baseSnapshotId
+          : null,
+      };
+    });
+
+  assignMissingSnapshotVersionNumbers(normalized);
+  return normalized;
+}
+
+function assignMissingSnapshotVersionNumbers(snapshots) {
+  const usedVersions = new Set();
+
+  snapshots.forEach((snapshot) => {
+    if (
+      Number.isInteger(snapshot.versionNumber)
+      && snapshot.versionNumber > 0
+      && !usedVersions.has(snapshot.versionNumber)
+    ) {
+      usedVersions.add(snapshot.versionNumber);
+      return;
+    }
+
+    snapshot.versionNumber = null;
+  });
+
+  let nextVersion = 1;
+  snapshots
+    .filter((snapshot) => snapshot.versionNumber === null)
+    .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt))
+    .forEach((snapshot) => {
+      while (usedVersions.has(nextVersion)) {
+        nextVersion += 1;
+      }
+
+      snapshot.versionNumber = nextVersion;
+      usedVersions.add(nextVersion);
+      nextVersion += 1;
+    });
 }
 
 function normalizeProjectRecord(project, index = 0) {
@@ -1489,6 +2681,8 @@ function normalizeProjectRecord(project, index = 0) {
     id: project.id || createId(),
     name: sanitizeProjectName(project.name) || `Proyecto ${index + 1}`,
     rows: normalizedRows,
+    auditEntries: normalizeAuditEntries(project.auditEntries),
+    snapshots: normalizeSnapshots(project.snapshots),
     collapsedIds: Array.isArray(project.collapsedIds)
       ? project.collapsedIds.filter((id) => typeof id === "string")
       : [],
@@ -1557,9 +2751,73 @@ function loadRows() {
   }
 }
 
-function saveRows(rows) {
+function saveRows(rows, markSaved = true) {
   state.rows = cloneRows(rows);
-  saveProjectState();
+  saveProjectState(markSaved);
+}
+
+function appendAuditEntries(entries, markSaved = true) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return;
+  }
+
+  state.auditEntries = normalizeAuditEntries([...state.auditEntries, ...entries]);
+  saveProjectState(markSaved);
+}
+
+function createFieldAuditEntry(rowId, field, beforeValue, afterValue) {
+  return {
+    id: createId(),
+    rowId,
+    type: "field",
+    field,
+    beforeValue,
+    afterValue,
+    userName: state.operatorName,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function createStructureAuditEntry(rowId, beforeLevel, afterLevel, beforeCode, afterCode) {
+  return {
+    id: createId(),
+    rowId,
+    type: "structure",
+    field: "estructura",
+    beforeLevel,
+    afterLevel,
+    beforePartidaCode: beforeCode,
+    afterPartidaCode: afterCode,
+    userName: state.operatorName,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function collectStructureAuditEntries(previousRows, nextRows) {
+  const previousCodes = buildPartidaCodes(previousRows);
+  const nextCodes = buildPartidaCodes(nextRows);
+
+  return nextRows.reduce((entries, row, index) => {
+    const previousIndex = previousRows.findIndex((entry) => entry.id === row.id);
+    if (previousIndex === -1) {
+      return entries;
+    }
+
+    const previousRow = previousRows[previousIndex];
+    const previousCode = previousCodes[previousIndex] || "";
+    const nextCode = nextCodes[index] || "";
+    const previousLevel = previousRow.level + 1;
+    const nextLevel = row.level + 1;
+
+    if (previousLevel === nextLevel && previousCode === nextCode) {
+      return entries;
+    }
+
+    entries.push(
+      createStructureAuditEntry(row.id, previousLevel, nextLevel, previousCode, nextCode),
+    );
+    return entries;
+  }, []);
 }
 
 function loadUiState() {
@@ -1587,22 +2845,153 @@ function saveUiState(value) {
 function persistUiState() {
   saveUiState({
     currentView: state.currentView,
+    operatorName: state.operatorName,
+    auditFilter: state.auditFilter,
     sidebarCollapsed: state.sidebarCollapsed,
   });
 }
 
 function saveProjectState(markSaved = true) {
   syncCurrentProjectState();
-  window.localStorage.setItem(
-    PROJECTS_STORAGE_KEY,
-    JSON.stringify({
-      currentProjectId: state.currentProjectId,
-      projects: state.projects,
-    }),
-  );
+  const payload = serializeProjectsState();
+  cacheProjectsState(payload);
+
+  if (persistence.bootstrapped && persistence.remoteAvailable) {
+    scheduleRemoteProjectSave(markSaved);
+  }
 
   if (markSaved) {
     state.lastSavedAt = new Date();
+    updateSaveStatus();
+  }
+}
+
+function serializeProjectsState() {
+  return {
+    currentProjectId: state.currentProjectId,
+    projects: state.projects.map((project, index) => normalizeProjectRecord(project, index)),
+  };
+}
+
+function cacheProjectsState(payload) {
+  window.localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function applyStoredProjectsState(payload, options = {}) {
+  const { resetSelection = false } = options;
+  const projects = Array.isArray(payload?.projects)
+    ? payload.projects.map((project, index) => normalizeProjectRecord(project, index))
+    : [];
+
+  if (projects.length === 0) {
+    return false;
+  }
+
+  const currentProjectId = projects.some((project) => project.id === payload?.currentProjectId)
+    ? payload.currentProjectId
+    : projects[0].id;
+  const previousSelectedId = state.selectedId;
+
+  state.projects = projects;
+  state.currentProjectId = currentProjectId;
+  hydrateCurrentProject(resetSelection);
+  pruneCollapsedIds();
+
+  if (!resetSelection && state.rows.some((row) => row.id === previousSelectedId)) {
+    state.selectedId = previousSelectedId;
+  } else {
+    state.selectedId = state.rows[0] ? state.rows[0].id : null;
+  }
+
+  return true;
+}
+
+function scheduleRemoteProjectSave(markSaved) {
+  if (persistence.saveTimerId) {
+    window.clearTimeout(persistence.saveTimerId);
+  }
+
+  persistence.saveTimerId = window.setTimeout(() => {
+    persistence.saveTimerId = null;
+    persistProjectsToServer(markSaved);
+  }, REMOTE_SAVE_DEBOUNCE_MS);
+}
+
+async function persistProjectsToServer(markSaved = true) {
+  if (!persistence.remoteAvailable) {
+    return false;
+  }
+
+  const payload = serializeProjectsState();
+  state.isSavingRemote = true;
+  state.remoteSaveError = false;
+  updateSaveStatus();
+
+  try {
+    persistence.saveInFlight = window.fetch(SERVER_STATE_ENDPOINT, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const response = await persistence.saveInFlight;
+
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}`);
+    }
+
+    const result = await response.json();
+    state.storageMode = normalizeStorageMode(result.storage);
+
+    if (markSaved) {
+      state.lastSavedAt = new Date();
+    }
+    state.remoteSaveError = false;
+    return true;
+  } catch {
+    state.remoteSaveError = true;
+    return false;
+  } finally {
+    persistence.saveInFlight = null;
+    state.isSavingRemote = false;
+    updateSaveStatus();
+  }
+}
+
+async function bootstrapServerPersistence() {
+  state.isHydratingRemote = true;
+  updateSaveStatus();
+
+  try {
+    const response = await window.fetch(SERVER_STATE_ENDPOINT, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Error ${response.status}`);
+    }
+
+    const payload = await response.json();
+    persistence.remoteAvailable = true;
+    state.storageMode = normalizeStorageMode(payload.storage);
+
+    if (Array.isArray(payload.projects) && payload.projects.length > 0) {
+      applyStoredProjectsState(payload);
+      cacheProjectsState(serializeProjectsState());
+      render();
+    } else {
+      await persistProjectsToServer(false);
+    }
+  } catch {
+    persistence.remoteAvailable = false;
+    state.storageMode = "local-cache";
+    state.remoteSaveError = false;
+  } finally {
+    persistence.bootstrapped = true;
+    state.isHydratingRemote = false;
     updateSaveStatus();
   }
 }
@@ -1617,6 +3006,8 @@ function syncCurrentProjectState() {
   state.projects[currentIndex] = {
     ...currentProject,
     rows: cloneRows(state.rows),
+    auditEntries: normalizeAuditEntries(state.auditEntries),
+    snapshots: normalizeSnapshots(state.snapshots),
     collapsedIds: Array.from(state.collapsedIds),
     updatedAt: new Date().toISOString(),
   };
@@ -1635,6 +3026,25 @@ function getCurrentProject() {
 
 function sanitizeProjectName(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function sanitizeSnapshotName(value) {
+  return sanitizeProjectName(value);
+}
+
+function sanitizeOperatorName(value) {
+  const sanitized = String(value || "").trim().replace(/\s+/g, " ");
+  return sanitized || DEFAULT_OPERATOR_NAME;
+}
+
+function sanitizeTipoMetrado(value) {
+  const sanitized = String(value || "").trim();
+  return METRADO_TYPE_OPTIONS.includes(sanitized) ? sanitized : "";
+}
+
+function sanitizeUnidadPartida(value) {
+  const sanitized = sanitizeSingleLine(value).trim();
+  return UNIDAD_PARTIDA_OPTIONS.includes(sanitized) ? sanitized : sanitized;
 }
 
 function ensureUniqueProjectName(name, excludedProjectId) {
@@ -1668,13 +3078,412 @@ function getNextProjectName() {
   return ensureUniqueProjectName(`Proyecto ${state.projects.length + 1}`, null);
 }
 
+function getDefaultSnapshotName() {
+  return `Foto ${formatSnapshotDate(new Date().toISOString())}`;
+}
+
+function getSnapshotsSortedNewestFirst(snapshots = state.snapshots) {
+  return snapshots
+    .slice()
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
+}
+
+function getSnapshotsSortedOldestFirst(snapshots = state.snapshots) {
+  return snapshots
+    .slice()
+    .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt));
+}
+
+function getLatestSnapshot() {
+  return getSnapshotsSortedNewestFirst()[0] || null;
+}
+
+function getPreviousSnapshot(snapshotId) {
+  const snapshots = getSnapshotsSortedOldestFirst();
+  const index = snapshots.findIndex((snapshot) => snapshot.id === snapshotId);
+  return index > 0 ? snapshots[index - 1] : null;
+}
+
+function getNextSnapshotVersionNumber() {
+  return state.snapshots.reduce((max, snapshot) => {
+    return Math.max(max, snapshot.versionNumber || 0);
+  }, 0) + 1;
+}
+
+function getCurrentBudgetVersion() {
+  const currentProject = getCurrentProject();
+  const rows = cloneRows(state.rows);
+
+  return {
+    id: "current",
+    name: "Presupuesto actual",
+    rows,
+    summary: buildSnapshotSummary(rows),
+    userName: state.operatorName,
+    createdAt: currentProject ? currentProject.updatedAt : new Date().toISOString(),
+    versionNumber: null,
+  };
+}
+
+function getBudgetVersionOptions() {
+  return [getCurrentBudgetVersion(), ...getSnapshotsSortedNewestFirst()];
+}
+
+function getBudgetTimelineVersions() {
+  return [...getSnapshotsSortedOldestFirst(), getCurrentBudgetVersion()];
+}
+
+function findBudgetVersionById(versionId) {
+  if (versionId === "current") {
+    return getCurrentBudgetVersion();
+  }
+
+  return state.snapshots.find((snapshot) => snapshot.id === versionId) || null;
+}
+
+function getBudgetVersionLabel(version) {
+  if (!version) {
+    return "Version";
+  }
+
+  if (version.id === "current") {
+    return "Presupuesto actual";
+  }
+
+  return `V${version.versionNumber} - ${version.name}`;
+}
+
+function ensureSnapshotComparisonSelection() {
+  const options = getBudgetVersionOptions();
+  if (options.length === 0) {
+    state.snapshotCompareBaseId = null;
+    state.snapshotCompareTargetId = null;
+    return;
+  }
+
+  if (options.length === 1) {
+    state.snapshotCompareBaseId = options[0].id;
+    state.snapshotCompareTargetId = null;
+    return;
+  }
+
+  const allowedIds = new Set(options.map((option) => option.id));
+  let baseId = allowedIds.has(state.snapshotCompareBaseId)
+    ? state.snapshotCompareBaseId
+    : null;
+  let targetId = allowedIds.has(state.snapshotCompareTargetId)
+    ? state.snapshotCompareTargetId
+    : null;
+
+  if (!baseId) {
+    baseId = getLatestSnapshot() ? getLatestSnapshot().id : options[0].id;
+  }
+
+  if (!targetId) {
+    targetId = "current";
+  }
+
+  if (baseId === targetId) {
+    const fallback = options.find((option) => option.id !== baseId);
+    targetId = fallback ? fallback.id : null;
+  }
+
+  state.snapshotCompareBaseId = baseId;
+  state.snapshotCompareTargetId = targetId;
+}
+
+function updateSnapshotComparison(role, versionId) {
+  if (role === "base") {
+    state.snapshotCompareBaseId = versionId;
+  } else if (role === "target") {
+    state.snapshotCompareTargetId = versionId;
+  } else {
+    return;
+  }
+
+  ensureSnapshotComparisonSelection();
+
+  if (state.snapshotCompareBaseId === state.snapshotCompareTargetId) {
+    const fallback = getBudgetVersionOptions().find((option) => {
+      return option.id !== state.snapshotCompareBaseId;
+    });
+
+    if (role === "base") {
+      state.snapshotCompareTargetId = fallback ? fallback.id : null;
+    } else {
+      state.snapshotCompareBaseId = fallback ? fallback.id : null;
+    }
+  }
+
+  render();
+}
+
+function setSnapshotComparison(baseId, targetId) {
+  state.snapshotCompareBaseId = baseId;
+  state.snapshotCompareTargetId = targetId;
+  ensureSnapshotComparisonSelection();
+  render();
+}
+
+function buildBudgetComparison(baseVersion, targetVersion) {
+  const baseSummary = baseVersion.summary || buildSnapshotSummary(baseVersion.rows);
+  const targetSummary = targetVersion.summary || buildSnapshotSummary(targetVersion.rows);
+  const baseMap = buildComparableBudgetMap(baseVersion.rows);
+  const targetMap = buildComparableBudgetMap(targetVersion.rows);
+  const allIds = new Set([...baseMap.keys(), ...targetMap.keys()]);
+  const changes = [];
+  const counts = {
+    added: 0,
+    removed: 0,
+    updated: 0,
+  };
+
+  allIds.forEach((rowId) => {
+    const baseItem = baseMap.get(rowId) || null;
+    const targetItem = targetMap.get(rowId) || null;
+
+    if (!baseItem && targetItem) {
+      counts.added += 1;
+      changes.push({
+        kind: "added",
+        title: targetItem.title,
+        meta: `Agregada | ${targetItem.code || "Sin codigo"}`,
+        detail: `Nueva partida en el objetivo. Parcial ${formatAmount(targetItem.partial)}.`,
+        deltaPartial: targetItem.partial,
+      });
+      return;
+    }
+
+    if (baseItem && !targetItem) {
+      counts.removed += 1;
+      changes.push({
+        kind: "removed",
+        title: baseItem.title,
+        meta: `Eliminada | ${baseItem.code || "Sin codigo"}`,
+        detail: `La partida ya no existe en el objetivo. Parcial base ${formatAmount(baseItem.partial)}.`,
+        deltaPartial: -baseItem.partial,
+      });
+      return;
+    }
+
+    if (baseItem && targetItem && didComparableBudgetItemChange(baseItem, targetItem)) {
+      counts.updated += 1;
+      changes.push({
+        kind: "updated",
+        title: targetItem.title || baseItem.title,
+        meta: `Editada | ${targetItem.code || baseItem.code || "Sin codigo"}`,
+        detail: describeComparableBudgetChange(baseItem, targetItem),
+        deltaPartial: targetItem.partial - baseItem.partial,
+      });
+    }
+  });
+
+  changes.sort((left, right) => Math.abs(right.deltaPartial) - Math.abs(left.deltaPartial));
+
+  return {
+    baseSummary,
+    targetSummary,
+    deltas: {
+      grandTotal: targetSummary.grandTotal - baseSummary.grandTotal,
+      rowCount: targetSummary.rowCount - baseSummary.rowCount,
+      rootCount: targetSummary.rootCount - baseSummary.rootCount,
+      leafCount: targetSummary.leafCount - baseSummary.leafCount,
+      metradoTradicionalTotal:
+        targetSummary.metradoTradicionalTotal - baseSummary.metradoTradicionalTotal,
+      metradoBimTotal: targetSummary.metradoBimTotal - baseSummary.metradoBimTotal,
+    },
+    deltaPercent: getDeltaPercent(baseSummary.grandTotal, targetSummary.grandTotal),
+    counts,
+    changes,
+  };
+}
+
+function buildComparableBudgetMap(rows) {
+  const safeRows = cloneRows(rows);
+  const codes = buildPartidaCodes(safeRows);
+
+  return safeRows.reduce((map, row, index) => {
+    map.set(row.id, {
+      id: row.id,
+      code: codes[index] || "",
+      level: row.level,
+      codificacion: sanitizeCodificacion(row.codificacion || ""),
+      descripcion: sanitizeDescripcion(row.descripcion || "").trim(),
+      grupoTablas: getGrupoTablasForRow(safeRows, index, codes),
+      unidad: String(row.unidad || "").trim(),
+      costo: parseDecimal(row.costo),
+      metradoTradicional: parseDecimal(row.metradoTradicional ?? row.metrado),
+      metradoBim: parseDecimal(row.metradoBim),
+      partial: getRowPartialAtIndexForRows(safeRows, index),
+      title:
+        sanitizeDescripcion(row.descripcion || "").trim()
+        || sanitizeCodificacion(row.codificacion || "")
+        || codes[index]
+        || `Fila ${index + 1}`,
+    });
+    return map;
+  }, new Map());
+}
+
+function didComparableBudgetItemChange(baseItem, targetItem) {
+  return (
+    baseItem.level !== targetItem.level
+    || baseItem.codificacion !== targetItem.codificacion
+    || baseItem.descripcion !== targetItem.descripcion
+    || baseItem.grupoTablas !== targetItem.grupoTablas
+    || baseItem.unidad !== targetItem.unidad
+    || !areAmountsEqual(baseItem.costo, targetItem.costo)
+    || !areAmountsEqual(baseItem.metradoTradicional, targetItem.metradoTradicional)
+    || !areAmountsEqual(baseItem.metradoBim, targetItem.metradoBim)
+  );
+}
+
+function describeComparableBudgetChange(baseItem, targetItem) {
+  const details = [];
+
+  if (baseItem.level !== targetItem.level) {
+    details.push(`Nivel ${baseItem.level + 1} -> ${targetItem.level + 1}`);
+  }
+
+  if (baseItem.codificacion !== targetItem.codificacion) {
+    details.push(
+      `Codificacion ${formatComparisonText(baseItem.codificacion)} -> ${formatComparisonText(targetItem.codificacion)}`,
+    );
+  }
+
+  if (baseItem.descripcion !== targetItem.descripcion) {
+    details.push(
+      `Descripcion ${formatComparisonText(baseItem.descripcion)} -> ${formatComparisonText(targetItem.descripcion)}`,
+    );
+  }
+
+  if (baseItem.grupoTablas !== targetItem.grupoTablas) {
+    details.push(
+      `Grupo Tablas ${formatComparisonText(baseItem.grupoTablas)} -> ${formatComparisonText(targetItem.grupoTablas)}`,
+    );
+  }
+
+  if (baseItem.unidad !== targetItem.unidad) {
+    details.push(
+      `Unidad ${formatComparisonText(baseItem.unidad)} -> ${formatComparisonText(targetItem.unidad)}`,
+    );
+  }
+
+  if (!areAmountsEqual(baseItem.costo, targetItem.costo)) {
+    details.push(`Costo ${formatAmount(baseItem.costo)} -> ${formatAmount(targetItem.costo)}`);
+  }
+
+  if (!areAmountsEqual(baseItem.metradoTradicional, targetItem.metradoTradicional)) {
+    details.push(
+      `Metrado trad. ${formatAmount(baseItem.metradoTradicional)} -> ${formatAmount(targetItem.metradoTradicional)}`,
+    );
+  }
+
+  if (!areAmountsEqual(baseItem.metradoBim, targetItem.metradoBim)) {
+    details.push(
+      `Metrado BIM ${formatAmount(baseItem.metradoBim)} -> ${formatAmount(targetItem.metradoBim)}`,
+    );
+  }
+
+  details.push(`Parcial ${formatAmount(baseItem.partial)} -> ${formatAmount(targetItem.partial)}`);
+
+  return details.slice(0, 4).join(" | ");
+}
+
+function formatComparisonText(value) {
+  const text = String(value || "").trim();
+  return text || "vacio";
+}
+
+function areAmountsEqual(left, right) {
+  return Math.abs(left - right) < 0.000001;
+}
+
+function getDeltaPercent(baseValue, targetValue) {
+  if (!baseValue) {
+    return targetValue === 0 ? 0 : null;
+  }
+
+  return ((targetValue - baseValue) / baseValue) * 100;
+}
+
+function formatSignedAmount(value) {
+  if (value === null || value === undefined) {
+    return "N/A";
+  }
+
+  return `${value > 0 ? "+" : value < 0 ? "-" : ""}${formatAmount(Math.abs(value))}`;
+}
+
+function formatSignedPercent(value) {
+  if (value === null || value === undefined) {
+    return "N/A";
+  }
+
+  return `${value > 0 ? "+" : value < 0 ? "-" : ""}${formatAmount(Math.abs(value))}%`;
+}
+
+function formatSignedInteger(value) {
+  if (value === null || value === undefined) {
+    return "N/A";
+  }
+
+  if (value === 0) {
+    return "0";
+  }
+
+  return `${value > 0 ? "+" : ""}${value}`;
+}
+
+function getDeltaToneClass(value) {
+  if (value === null || value === undefined) {
+    return "is-neutral";
+  }
+
+  if (value > 0) {
+    return "is-positive";
+  }
+
+  if (value < 0) {
+    return "is-negative";
+  }
+
+  return "is-neutral";
+}
+
 function updateSaveStatus() {
   if (!saveStatus) {
     return;
   }
 
+  if (storageModePill) {
+    storageModePill.textContent = getStorageModePillLabel(state.storageMode);
+  }
+
+  if (appModeLabel) {
+    appModeLabel.textContent = getStorageModeAppLabel(state.storageMode);
+  }
+
+  if (state.isHydratingRemote) {
+    saveStatus.textContent = `Conectando a ${getStorageModeTargetLabel(state.storageMode)}...`;
+    return;
+  }
+
+  if (state.isSavingRemote) {
+    saveStatus.textContent = `Guardando en ${getStorageModeTargetLabel(state.storageMode)}...`;
+    return;
+  }
+
+  if (state.remoteSaveError && state.storageMode !== "local-cache") {
+    saveStatus.textContent = `${getStorageModeShortLabel(state.storageMode)} sin sincronizar`;
+    return;
+  }
+
   if (!state.lastSavedAt) {
-    saveStatus.textContent = "Guardado local activo";
+    saveStatus.textContent =
+      state.storageMode === "local-cache"
+        ? "Guardado local activo"
+        : `${getStorageModeShortLabel(state.storageMode)} activo`;
     return;
   }
 
@@ -1682,7 +3491,70 @@ function updateSaveStatus() {
     hour: "2-digit",
     minute: "2-digit",
   });
-  saveStatus.textContent = `Guardado local ${time}`;
+  saveStatus.textContent =
+    state.storageMode === "local-cache"
+      ? `Guardado navegador ${time}`
+      : `${getStorageModeShortLabel(state.storageMode)} ${time}`;
+}
+
+function normalizeStorageMode(value) {
+  if (value === "google-sheets") {
+    return "google-sheets";
+  }
+
+  if (value === "sqlite" || value === "database") {
+    return "database";
+  }
+
+  return "local-cache";
+}
+
+function getStorageModePillLabel(storageMode) {
+  if (storageMode === "google-sheets") {
+    return "Google Sheets";
+  }
+
+  if (storageMode === "database") {
+    return "SQLite local";
+  }
+
+  return "Solo navegador";
+}
+
+function getStorageModeAppLabel(storageMode) {
+  if (storageMode === "google-sheets") {
+    return "Aplicativo web local con Google Sheets";
+  }
+
+  if (storageMode === "database") {
+    return "Aplicativo web local con SQLite";
+  }
+
+  return "Aplicativo web local";
+}
+
+function getStorageModeShortLabel(storageMode) {
+  if (storageMode === "google-sheets") {
+    return "Google Sheets";
+  }
+
+  if (storageMode === "database") {
+    return "SQLite local";
+  }
+
+  return "Guardado local";
+}
+
+function getStorageModeTargetLabel(storageMode) {
+  if (storageMode === "google-sheets") {
+    return "Google Sheets";
+  }
+
+  if (storageMode === "database") {
+    return "SQLite local";
+  }
+
+  return "almacenamiento local";
 }
 
 function normalizeRows(rows) {
@@ -1738,6 +3610,18 @@ function buildPartidaCodes(rows) {
 
 function rowHasChildren(rows, index) {
   return index < rows.length - 1 && rows[index + 1].level > rows[index].level;
+}
+
+function getRowIndexById(rowId) {
+  return state.rows.findIndex((row) => row.id === rowId);
+}
+
+function isLeafOnlyField(fieldName) {
+  return ["costo", "metradoTradicional", "metradoBim", "tipoMetrado"].includes(fieldName);
+}
+
+function isLeafValueField(fieldName) {
+  return ["costo", "metradoTradicional", "metradoBim"].includes(fieldName);
 }
 
 function getSelectedIndex() {
@@ -1805,16 +3689,29 @@ function exportRootBranch(rootId) {
 
   const codes = buildPartidaCodes(state.rows);
   const branchEnd = getBranchEnd(state.rows, rootIndex);
-  const exportRows = state.rows.slice(rootIndex, branchEnd + 1).map((row, offset) => {
-    const absoluteIndex = rootIndex + offset;
-    return {
-      codificacion: row.codificacion || "",
-      codigoPartida: codes[absoluteIndex] || "",
-      descripcion: row.descripcion || "",
-      unidad: row.unidad || "",
-      costo: parseDecimal(row.costo),
-    };
-  });
+  const exportRows = state.rows
+    .slice(rootIndex, branchEnd + 1)
+    .reduce((rows, row, offset) => {
+      if (normalizeText(row.tipoMetrado).trim() !== "revit") {
+        return rows;
+      }
+
+      const absoluteIndex = rootIndex + offset;
+      rows.push({
+        codificacion: row.codificacion || "",
+        codigoPartida: codes[absoluteIndex] || "",
+        descripcion: row.descripcion || "",
+        unidad: row.unidad || "",
+        costo: parseDecimal(row.costo),
+        grupoTablas: getGrupoTablasForRow(state.rows, absoluteIndex, codes),
+      });
+      return rows;
+    }, []);
+
+  if (exportRows.length === 0) {
+    window.alert("No hay filas con Tipo de metrado = Revit en esta raiz.");
+    return;
+  }
 
   const label = getRootExportLabel(rootRow, codes[rootIndex]);
   const fileName = sanitizeFilename(`${projectTitle.textContent} - ${label}`) || "exportacion-rvt";
@@ -1837,6 +3734,7 @@ function buildExcelWorkbook(title, rows) {
     "DESCRIPCIÓN DE PARTIDA",
     "UNIDAD DE PARTIDA",
     "COSTO",
+    "GRUPO TABLAS",
   ];
 
   const tableRows = rows
@@ -1848,6 +3746,7 @@ function buildExcelWorkbook(title, rows) {
           <td>${escapeHtml(row.descripcion)}</td>
           <td>${escapeHtml(row.unidad)}</td>
           <td>${escapeHtml(row.costo)}</td>
+          <td>${escapeHtml(row.grupoTablas || "")}</td>
         </tr>
       `;
     })
@@ -1924,6 +3823,7 @@ function buildXlsxWorkbook(title, rows) {
     "DESCRIPCI\u00D3N DE PARTIDA",
     "UNIDAD DE PARTIDA",
     "COSTO",
+    "GRUPO TABLAS",
   ];
   const timestamp = new Date().toISOString();
   const worksheetRows = [
@@ -1943,6 +3843,7 @@ function buildXlsxWorkbook(title, rows) {
         ${buildInlineStringCell(getExcelCellRef(2, excelRow), row.descripcion, 0)}
         ${buildInlineStringCell(getExcelCellRef(3, excelRow), row.unidad, 0)}
         ${buildNumberCell(getExcelCellRef(4, excelRow), row.costo, 2)}
+        ${buildInlineStringCell(getExcelCellRef(5, excelRow), row.grupoTablas || "", 0)}
       </row>
     `;
     }),
@@ -1950,7 +3851,7 @@ function buildXlsxWorkbook(title, rows) {
 
   const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <dimension ref="A1:E${Math.max(rows.length + 1, 1)}"/>
+  <dimension ref="A1:F${Math.max(rows.length + 1, 1)}"/>
   <sheetViews>
     <sheetView workbookViewId="0"/>
   </sheetViews>
@@ -1961,6 +3862,7 @@ function buildXlsxWorkbook(title, rows) {
     <col min="3" max="3" width="46" customWidth="1"/>
     <col min="4" max="4" width="20" customWidth="1"/>
     <col min="5" max="5" width="14" customWidth="1"/>
+    <col min="6" max="6" width="28" customWidth="1"/>
   </cols>
   <sheetData>${worksheetRows}</sheetData>
 </worksheet>`;
@@ -2373,6 +4275,37 @@ function insertAtArray(rows, index, row) {
 }
 
 function getRowPartial(row) {
+  const rowIndex = getRowIndexById(row.id);
+  return getRowPartialAtIndex(rowIndex);
+}
+
+function getRowPartialAtIndex(rowIndex) {
+  return getRowPartialAtIndexForRows(state.rows, rowIndex);
+}
+
+function getRowPartialAtIndexForRows(rows, rowIndex) {
+  const row = rows[rowIndex];
+  if (!row) {
+    return 0;
+  }
+
+  if (!rowHasChildren(rows, rowIndex)) {
+    return getLeafRowPartial(row);
+  }
+
+  const branchEnd = getBranchEnd(rows, rowIndex);
+  let subtotal = 0;
+
+  for (let cursor = rowIndex + 1; cursor <= branchEnd; cursor += 1) {
+    if (!rowHasChildren(rows, cursor)) {
+      subtotal += getLeafRowPartial(rows[cursor]);
+    }
+  }
+
+  return subtotal;
+}
+
+function getLeafRowPartial(row) {
   const costo = parseDecimal(row.costo);
   const metradoTradicional = parseDecimal(row.metradoTradicional ?? row.metrado);
   const metradoBim = parseDecimal(row.metradoBim);
@@ -2394,6 +4327,38 @@ function formatAmount(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
+}
+
+function getGrandTotalForRows(rows) {
+  return rows.reduce((sum, row, index) => {
+    return row.level === 0 ? sum + getRowPartialAtIndexForRows(rows, index) : sum;
+  }, 0);
+}
+
+function buildSnapshotSummary(rows) {
+  const safeRows = cloneRows(rows);
+  const rowCount = safeRows.length;
+  const rootCount = safeRows.filter((row) => row.level === 0).length;
+
+  return safeRows.reduce(
+    (summary, row, index) => {
+      if (!rowHasChildren(safeRows, index)) {
+        summary.leafCount += 1;
+        summary.metradoTradicionalTotal += parseDecimal(row.metradoTradicional ?? row.metrado);
+        summary.metradoBimTotal += parseDecimal(row.metradoBim);
+      }
+
+      return summary;
+    },
+    {
+      rowCount,
+      rootCount,
+      leafCount: 0,
+      grandTotal: getGrandTotalForRows(safeRows),
+      metradoTradicionalTotal: 0,
+      metradoBimTotal: 0,
+    },
+  );
 }
 
 function updateTableMinWidth(viewConfig = getCurrentViewConfig()) {
@@ -2421,7 +4386,7 @@ function sanitizeCodificacion(value) {
 }
 
 function sanitizeDescripcion(value) {
-  return sanitizeSingleLine(value).trim().replace(/\s+/g, " ");
+  return sanitizeSingleLine(value);
 }
 
 function normalizeCodificacionKey(value) {
@@ -2433,7 +4398,7 @@ function findDuplicateCodificacion(value, excludedRowId) {
 }
 
 function normalizeDescripcionKey(value) {
-  return normalizeText(sanitizeDescripcion(value)).trim();
+  return normalizeText(sanitizeSingleLine(value)).trim().replace(/\s+/g, " ");
 }
 
 function findDuplicateDescripcion(value, excludedRowId) {
@@ -2492,19 +4457,24 @@ function updateSelectionUi() {
   });
 }
 
-function updatePartialCell(rowId) {
-  const row = state.rows.find((entry) => entry.id === rowId);
-  const partialCell = body.querySelector(
-    `tr[data-row-id="${rowId}"] .partial-cell`,
-  );
+function updateVisiblePartialCells() {
+  body.querySelectorAll("tr[data-row-id]").forEach((rowElement) => {
+    const rowId = rowElement.dataset.rowId;
+    const rowIndex = getRowIndexById(rowId);
+    const partialCell = rowElement.querySelector(".partial-cell");
 
-  if (!row || !partialCell) {
-    return;
-  }
+    if (rowIndex === -1 || !partialCell) {
+      return;
+    }
 
-  const partial = getRowPartial(row);
-  partialCell.textContent = formatAmount(partial);
-  partialCell.classList.toggle("is-empty", partial === 0);
+    const partial = getRowPartialAtIndex(rowIndex);
+    partialCell.textContent = formatAmount(partial);
+    partialCell.classList.toggle("is-empty", partial === 0);
+    partialCell.classList.toggle(
+      "partial-cell--subtotal",
+      rowHasChildren(state.rows, rowIndex),
+    );
+  });
 }
 
 function autoSizeTextarea(textarea) {

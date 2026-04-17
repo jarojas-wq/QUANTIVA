@@ -1,0 +1,14 @@
+{
+  "name": "itemicostos",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "db:mysql:full-migrate": "node scripts/mysql-full-migrate.js"
+  },
+  "dependencies": {
+    "googleapis": "^171.4.0",
+    "mysql2": "^3.15.3"
+  }
+}

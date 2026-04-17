@@ -36,6 +36,9 @@
           <button type="button" class="nav-item" data-view="presupuesto">
             Presupuesto
           </button>
+          <button type="button" class="nav-item" data-view="auditoria">
+            Auditoría
+          </button>
           <button type="button" class="nav-item" data-view="exportaciones-rvt">
             Exportaciones para RVT
           </button>
@@ -63,7 +66,7 @@
         <header class="topbar">
           <div class="topbar-copy">
             <strong>Itemizado y costos</strong>
-            <span>Aplicativo web local</span>
+            <span id="app-mode-label">Aplicativo web local</span>
           </div>
 
           <div class="project-switcher">
@@ -80,6 +83,17 @@
             </button>
           </div>
 
+          <div class="operator-wrap">
+            <label class="project-switcher-label" for="operator-name-input">Responsable</label>
+            <input
+              id="operator-name-input"
+              class="operator-input"
+              type="text"
+              placeholder="Usuario local"
+              aria-label="Responsable de cambios"
+            />
+          </div>
+
           <div id="search-wrap" class="search-wrap">
             <input
               id="table-search-input"
@@ -89,8 +103,11 @@
           </div>
 
           <div class="topbar-actions">
+            <button id="save-snapshot-button" type="button" class="topbar-button" hidden>
+              Guardar foto
+            </button>
             <span class="status-pill">Auto guardado</span>
-            <span class="status-pill status-pill--soft">Modo local</span>
+            <span id="storage-mode-pill" class="status-pill status-pill--soft">Modo local</span>
           </div>
         </header>
 
@@ -197,6 +214,8 @@
             </div>
 
             <div id="export-panel" class="export-panel" hidden></div>
+            <div id="audit-panel" class="audit-panel" hidden></div>
+            <div id="snapshot-panel" class="snapshot-panel" hidden></div>
           </section>
         </main>
       </section>
