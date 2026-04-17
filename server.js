@@ -133,6 +133,10 @@ server.listen(port, host, async () => {
     console.log(`Google Sheets: ${health.spreadsheetUrl}`);
   }
 
+  if (health.storage === "google-apps-script" && health.spreadsheetUrl) {
+    console.log(`Google Sheets (Apps Script): ${health.spreadsheetUrl}`);
+  }
+
   if (health.storage === "sqlite" && health.databasePath) {
     console.log(`SQLite local: ${health.databasePath}`);
   }
@@ -144,6 +148,10 @@ server.listen(port, host, async () => {
 
 function createStorageAdapter() {
   const explicitStorage = String(process.env.ITEMICOSTOS_STORAGE || "").trim().toLowerCase();
+
+  if (explicitStorage === "google-apps-script" || explicitStorage === "apps-script") {
+    return new GoogleAppsScriptStorage();
+  }
 
   if (explicitStorage === "google-sheets") {
     return new GoogleSheetsStorage();
@@ -157,6 +165,10 @@ function createStorageAdapter() {
     return new SQLiteStorage(dbPath);
   }
 
+  if (shouldUseGoogleAppsScript()) {
+    return new GoogleAppsScriptStorage();
+  }
+
   if (shouldUseGoogleSheets()) {
     return new GoogleSheetsStorage();
   }
@@ -166,6 +178,12 @@ function createStorageAdapter() {
   }
 
   return new SQLiteStorage(dbPath);
+}
+
+function shouldUseGoogleAppsScript() {
+  return Boolean(
+    process.env.GOOGLE_APPS_SCRIPT_WEBAPP_URL,
+  );
 }
 
 function shouldUseGoogleSheets() {
@@ -1205,6 +1223,109 @@ class MySQLStorage {
   }
 }
 
+class GoogleAppsScriptStorage {
+  constructor() {
+    this.kind = "google-apps-script";
+    this.label = "Google Sheets (Apps Script)";
+    this.webAppUrl = String(process.env.GOOGLE_APPS_SCRIPT_WEBAPP_URL || "").trim();
+    this.token = String(process.env.GOOGLE_APPS_SCRIPT_TOKEN || "").trim();
+    this.timeoutMs = Number.parseInt(process.env.GOOGLE_APPS_SCRIPT_TIMEOUT_MS || "20000", 10);
+  }
+
+  async getHealth() {
+    try {
+      const payload = await this.callBridge("health", {});
+      return {
+        ok: true,
+        storage: this.kind,
+        webAppUrl: this.webAppUrl,
+        spreadsheetId: payload.spreadsheetId || null,
+        spreadsheetUrl: payload.spreadsheetUrl || null,
+        tabs: payload.tabs || null,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        storage: this.kind,
+        webAppUrl: this.webAppUrl,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async loadState() {
+    const payload = await this.callBridge("loadState", {});
+    const state = payload.state || {
+      currentProjectId: null,
+      projects: [],
+    };
+    return normalizeIncomingState(state);
+  }
+
+  async persistState(statePayload) {
+    const payload = await this.callBridge("persistState", {
+      payload: statePayload,
+    });
+    return {
+      savedAt: payload.savedAt || new Date().toISOString(),
+      spreadsheetId: payload.spreadsheetId || null,
+      spreadsheetUrl: payload.spreadsheetUrl || null,
+    };
+  }
+
+  async callBridge(action, extraPayload) {
+    if (!this.webAppUrl) {
+      throw new Error(
+        "Configura GOOGLE_APPS_SCRIPT_WEBAPP_URL para usar Google Sheets sin Google Cloud.",
+      );
+    }
+
+    const timeoutMs = Number.isFinite(this.timeoutMs) && this.timeoutMs > 0 ? this.timeoutMs : 20000;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(this.webAppUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          action,
+          token: this.token || undefined,
+          ...extraPayload,
+        }),
+        signal: controller.signal,
+      });
+
+      const bodyText = await response.text();
+      const parsed = tryParseJson(bodyText) || {};
+
+      if (!response.ok) {
+        const detail = parsed.detail || parsed.error || bodyText || `HTTP ${response.status}`;
+        throw new Error(`Apps Script devolvio ${response.status}: ${detail}`);
+      }
+
+      if (parsed.ok === false) {
+        throw new Error(parsed.detail || parsed.error || "Apps Script respondio con error.");
+      }
+
+      if (!parsed || typeof parsed !== "object") {
+        throw new Error("Apps Script devolvio una respuesta invalida.");
+      }
+
+      return parsed;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error(`Apps Script no respondio en ${timeoutMs} ms.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 class GoogleSheetsStorage {
   constructor() {
     this.kind = "google-sheets";
@@ -1542,6 +1663,18 @@ function chunkText(value, chunkSize) {
     chunks.push(source.slice(cursor, cursor + chunkSize));
   }
   return chunks;
+}
+
+function tryParseJson(value) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 function readInlineServiceAccountCredentials() {

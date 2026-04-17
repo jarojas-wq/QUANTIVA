@@ -12,11 +12,28 @@ Aplicativo web local para crear un itemizado jerarquico y editar presupuesto.
 ## Persistencia
 
 - Sin configuracion extra, la app usa SQLite local en `data/itemicostos.sqlite`.
+- Si defines `ITEMICOSTOS_STORAGE=google-apps-script`, la app guarda el estado en Google Sheets sin Google Cloud (via Apps Script).
 - Si defines `ITEMICOSTOS_STORAGE=google-sheets`, el backend guarda el estado completo en Google Sheets.
 - Si defines `ITEMICOSTOS_STORAGE=mysql`, el backend guarda y lee estado en MySQL/Cloud SQL.
 - Si existian datos en `localStorage`, la app los migra al abrirse contra el servidor local.
 
-## Google Sheets
+## Google Sheets sin Google Cloud (Apps Script)
+
+1. Crea un proyecto en [Google Apps Script](https://script.google.com/).
+2. Copia el archivo `scripts/google-apps-script-webapp.gs` en el editor.
+3. Opcional: define `ITEMICOSTOS.token` en el script para proteger el endpoint.
+4. Publica como web app:
+   - Execute as: `Me`
+   - Who has access: `Anyone` (o `Anyone with Google account`, segun tu necesidad)
+5. Copia la URL del despliegue y colocala en `.env`:
+   - `ITEMICOSTOS_STORAGE=google-apps-script`
+   - `GOOGLE_APPS_SCRIPT_WEBAPP_URL=<tu URL de web app>`
+   - `GOOGLE_APPS_SCRIPT_TOKEN=<token opcional>`
+6. Inicia la app con `npm start`.
+
+La primera vez que llegue un guardado, Apps Script crea el spreadsheet y pestañas `itemicostos_meta`, `itemicostos_state` e `itemicostos_projects`.
+
+## Google Sheets API (Google Cloud)
 
 - Define `GOOGLE_SHEETS_SPREADSHEET_ID` con el ID del spreadsheet destino.
 - Autentica con `GOOGLE_APPLICATION_CREDENTIALS` o con `GOOGLE_SERVICE_ACCOUNT_JSON`.

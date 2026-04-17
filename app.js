@@ -3502,6 +3502,10 @@ function normalizeStorageMode(value) {
     return "google-sheets";
   }
 
+  if (value === "google-apps-script") {
+    return "google-sheets";
+  }
+
   if (value === "sqlite" || value === "database") {
     return "database";
   }
