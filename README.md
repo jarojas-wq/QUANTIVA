@@ -1,4 +1,4 @@
-# Itemizado y Costos
+﻿# Itemizado y Costos
 
 Aplicativo web local para crear un itemizado jerarquico y editar presupuesto.
 
@@ -29,9 +29,19 @@ Aplicativo web local para crear un itemizado jerarquico y editar presupuesto.
    - `ITEMICOSTOS_STORAGE=google-apps-script`
    - `GOOGLE_APPS_SCRIPT_WEBAPP_URL=<tu URL de web app>`
    - `GOOGLE_APPS_SCRIPT_TOKEN=<token opcional>`
-6. Inicia la app con `npm start`.
+6. Si actualizaste el script, vuelve a desplegar (`Deploy > Manage deployments > Edit > Deploy`).
+7. Inicia la app con `npm start`.
 
-La primera vez que llegue un guardado, Apps Script crea el spreadsheet y pestañas `itemicostos_meta`, `itemicostos_state` e `itemicostos_projects`.
+La primera vez que llegue un guardado, Apps Script crea el spreadsheet y pestañas con estructura `MTRD_*`:
+- `MTRD_Proyecto`
+- `MTRD_Item`
+- `MTRD_ItemColapsado`
+- `MTRD_AuditoriaItem`
+- `MTRD_Snapshot`
+- `MTRD_SnapshotItem`
+- `MTRD_AppMeta`
+
+Si ya tenias datos en el esquema anterior (`itemicostos_state` por chunks), el bridge los migra automaticamente al formato `MTRD_*` en la primera lectura.
 
 ## Google Sheets API (Google Cloud)
 
