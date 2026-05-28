@@ -240,12 +240,17 @@ CREATE TABLE IF NOT EXISTS `MTRD_UsuarioAcceso` (
   `MTRD_UsuarioAcceso_Rol` VARCHAR(30) NOT NULL DEFAULT 'viewer' COMMENT 'Rol viewer/editor/admin/superadmin',
   `MTRD_UsuarioAcceso_Activo` TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Estado de acceso',
   `MTRD_UsuarioAcceso_ProyectoIdsJson` JSON NOT NULL COMMENT 'Lista de proyectos autorizados o *',
+  `MTRD_UsuarioAcceso_VistasProyectoJson` JSON NULL COMMENT 'Vistas activas por proyecto para el usuario',
   `MTRD_UsuarioAcceso_CreadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Fecha de creacion',
   `MTRD_UsuarioAcceso_ActualizadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Fecha de actualizacion',
   PRIMARY KEY (`MTRD_UsuarioAcceso_ID`),
   UNIQUE KEY `UQ_MTRD_UsuarioAcceso_UID` (`MTRD_UsuarioAcceso_UID`),
   UNIQUE KEY `UQ_MTRD_UsuarioAcceso_Email` (`MTRD_UsuarioAcceso_Email`)
 ) ENGINE=InnoDB COMMENT='Usuarios autorizados para Quantiva';
+
+ALTER TABLE `MTRD_UsuarioAcceso`
+  ADD COLUMN `MTRD_UsuarioAcceso_VistasProyectoJson` JSON NULL COMMENT 'Vistas activas por proyecto para el usuario'
+  AFTER `MTRD_UsuarioAcceso_ProyectoIdsJson`;
 
 CREATE TABLE IF NOT EXISTS `MTRD_SesionAcceso` (
   `MTRD_SesionAcceso_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna de sesion',

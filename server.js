@@ -17,6 +17,15 @@ const accessControlPath = path.join(dataDir, "access-control.json");
 const mysqlSchemaPath = path.join(__dirname, "sql", "mysql", "001_mtrd_itemicostos_real.sql");
 const revitIngestApiKey = String(process.env.REVIT_INGEST_API_KEY || "").trim();
 const webSessionCookieName = String(process.env.ACCESS_COOKIE_NAME || "mtr2_session").trim() || "mtr2_session";
+const PROJECT_VIEW_ACCESS_KEYS = [
+  "itemizado",
+  "presupuesto",
+  "control-bim",
+  "auditoria",
+  "exportaciones-rvt",
+  "exportacion-presupuesto",
+];
+const DEFAULT_PROJECT_VIEW_ACCESS_KEYS = [...PROJECT_VIEW_ACCESS_KEYS];
 
 fs.mkdirSync(dataDir, { recursive: true });
 
@@ -535,6 +544,7 @@ class MySQLStorage {
         MTRD_UsuarioAcceso_Rol AS role_name,
         MTRD_UsuarioAcceso_Activo AS active_flag,
         MTRD_UsuarioAcceso_ProyectoIdsJson AS project_ids_json,
+        MTRD_UsuarioAcceso_VistasProyectoJson AS view_access_json,
         MTRD_UsuarioAcceso_CreadoEn AS created_at,
         MTRD_UsuarioAcceso_ActualizadoEn AS updated_at
       FROM MTRD_UsuarioAcceso
@@ -549,6 +559,11 @@ class MySQLStorage {
         role: String(row.role_name || "viewer").trim().toLowerCase(),
         active: Number(row.active_flag) !== 0,
         projectIds: parseJsonArray(row.project_ids_json),
+        viewAccessByProject: normalizeViewAccessByProjectInput(
+          row.view_access_json,
+          parseJsonArray(row.project_ids_json),
+          row.role_name,
+        ),
         createdAt: normalizeIsoString(row.created_at),
         updatedAt: normalizeIsoString(row.updated_at),
       })),
@@ -589,14 +604,16 @@ class MySQLStorage {
             MTRD_UsuarioAcceso_Rol,
             MTRD_UsuarioAcceso_Activo,
             MTRD_UsuarioAcceso_ProyectoIdsJson,
+            MTRD_UsuarioAcceso_VistasProyectoJson,
             MTRD_UsuarioAcceso_CreadoEn,
             MTRD_UsuarioAcceso_ActualizadoEn
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             MTRD_UsuarioAcceso_Nombre = VALUES(MTRD_UsuarioAcceso_Nombre),
             MTRD_UsuarioAcceso_Rol = VALUES(MTRD_UsuarioAcceso_Rol),
             MTRD_UsuarioAcceso_Activo = VALUES(MTRD_UsuarioAcceso_Activo),
             MTRD_UsuarioAcceso_ProyectoIdsJson = VALUES(MTRD_UsuarioAcceso_ProyectoIdsJson),
+            MTRD_UsuarioAcceso_VistasProyectoJson = VALUES(MTRD_UsuarioAcceso_VistasProyectoJson),
             MTRD_UsuarioAcceso_ActualizadoEn = VALUES(MTRD_UsuarioAcceso_ActualizadoEn)
         `, [
           normalizeIdentifier(user.id, randomUUID()),
@@ -605,6 +622,11 @@ class MySQLStorage {
           role,
           user.active === false ? 0 : 1,
           JSON.stringify(role === "superadmin" ? ["*"] : projectIds),
+          JSON.stringify(normalizeViewAccessByProjectInput(
+            user.viewAccessByProject,
+            role === "superadmin" ? ["*"] : projectIds,
+            role,
+          )),
           toMySqlDateTime(user.createdAt),
           toMySqlDateTime(user.updatedAt || Date.now()),
         ]);
@@ -2108,6 +2130,11 @@ function createAccessControlManager(filePath, options = {}) {
         : requestedProjectIds.filter((projectId) => (
           availableProjectIdSet.size === 0 || availableProjectIdSet.has(projectId)
         ));
+      const viewAccessByProject = normalizeViewAccessByProjectInput(
+        payload?.viewAccessByProject,
+        projectIds,
+        requestedRole,
+      );
       if (requestedRole !== "superadmin" && active && availableProjectIdSet.size > 0 && projectIds.length === 0) {
         return {
           ok: false,
@@ -2121,6 +2148,7 @@ function createAccessControlManager(filePath, options = {}) {
         existing.role = requestedRole;
         existing.active = active;
         existing.projectIds = projectIds;
+        existing.viewAccessByProject = viewAccessByProject;
         existing.updatedAt = new Date().toISOString();
 
         if (!canPersistSuperAdminState(existing.email, existing.role, existing.active)) {
@@ -2147,6 +2175,7 @@ function createAccessControlManager(filePath, options = {}) {
         role: requestedRole,
         active,
         projectIds,
+        viewAccessByProject,
         createdAt,
         updatedAt: createdAt,
       };
@@ -2251,6 +2280,11 @@ function createAccessControlManager(filePath, options = {}) {
       user.projectIds,
       { allowWildcard: role === "superadmin" },
     );
+    const viewAccessByProject = normalizeViewAccessByProjectInput(
+      user.viewAccessByProject,
+      role === "superadmin" ? ["*"] : projectIds,
+      role,
+    );
     const createdAt = normalizeIsoString(user.createdAt || Date.now());
     const updatedAt = normalizeIsoString(user.updatedAt || createdAt);
 
@@ -2261,6 +2295,7 @@ function createAccessControlManager(filePath, options = {}) {
       role,
       active,
       projectIds: role === "superadmin" ? ["*"] : projectIds,
+      viewAccessByProject,
       createdAt,
       updatedAt,
     };
@@ -2272,18 +2307,25 @@ function createAccessControlManager(filePath, options = {}) {
     displayName = "",
     active = true,
     projectIds = [],
+    viewAccessByProject = null,
   }) {
     const nowIso = new Date().toISOString();
     const normalizedRole = normalizeAuthRole(role, "viewer");
+    const normalizedProjectIds = normalizedRole === "superadmin"
+      ? ["*"]
+      : normalizeProjectIdsForUser(projectIds, { allowWildcard: false });
     return {
       id: randomUUID(),
       email: normalizeAuthEmail(email),
       displayName: normalizeText(displayName, email),
       role: normalizedRole,
       active: active !== false,
-      projectIds: normalizedRole === "superadmin"
-        ? ["*"]
-        : normalizeProjectIdsForUser(projectIds, { allowWildcard: false }),
+      projectIds: normalizedProjectIds,
+      viewAccessByProject: normalizeViewAccessByProjectInput(
+        viewAccessByProject,
+        normalizedProjectIds,
+        normalizedRole,
+      ),
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -2324,6 +2366,7 @@ function createAccessControlManager(filePath, options = {}) {
       existingUser.active = true;
       existingUser.displayName = displayName;
       existingUser.projectIds = ["*"];
+      existingUser.viewAccessByProject = normalizeViewAccessByProjectInput(null, ["*"], "superadmin");
       existingUser.updatedAt = new Date().toISOString();
       await persistUsersStore();
       return existingUser;
@@ -2353,6 +2396,13 @@ function createAccessControlManager(filePath, options = {}) {
       projectIds: role === "superadmin"
         ? ["*"]
         : normalizeProjectIdsForUser(user?.projectIds, { allowWildcard: false }),
+      viewAccessByProject: normalizeViewAccessByProjectInput(
+        user?.viewAccessByProject,
+        role === "superadmin"
+          ? ["*"]
+          : normalizeProjectIdsForUser(user?.projectIds, { allowWildcard: false }),
+        role,
+      ),
       profileImageUrl,
       createdAt: normalizeIsoString(user?.createdAt || Date.now()),
       updatedAt: normalizeIsoString(user?.updatedAt || Date.now()),
@@ -2472,6 +2522,13 @@ function createAccessControlManager(filePath, options = {}) {
               user.projectIds,
               { allowWildcard: normalizeAuthRole(user.role, "viewer") === "superadmin" },
             ),
+            viewAccessByProject: normalizeViewAccessByProjectInput(
+              user.viewAccessByProject,
+              normalizeAuthRole(user.role, "viewer") === "superadmin"
+                ? ["*"]
+                : normalizeProjectIdsForUser(user.projectIds, { allowWildcard: false }),
+              normalizeAuthRole(user.role, "viewer"),
+            ),
             createdAt: normalizeIsoString(user.createdAt || Date.now()),
             updatedAt: normalizeIsoString(user.updatedAt || Date.now()),
           })),
@@ -2531,6 +2588,7 @@ function createAccessControlManager(filePath, options = {}) {
         existing.role = "superadmin";
         existing.active = true;
         existing.projectIds = ["*"];
+        existing.viewAccessByProject = normalizeViewAccessByProjectInput(null, ["*"], "superadmin");
         existing.updatedAt = new Date().toISOString();
         existing.displayName = normalizeText(existing.displayName, createdOrUpdated.displayName);
       } else {
@@ -2894,6 +2952,67 @@ function normalizeProjectIdsInput(projectIdsInput, { allowWildcard = true } = {}
     unique.push(normalized);
   });
   return unique;
+}
+
+function normalizeProjectViewKeysInput(viewKeysInput, { defaultAll = false } = {}) {
+  const rawValues = [];
+  if (Array.isArray(viewKeysInput)) {
+    rawValues.push(...viewKeysInput);
+  } else if (typeof viewKeysInput === "string") {
+    const trimmed = viewKeysInput.trim();
+    if (trimmed) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          rawValues.push(...parsed);
+        } else {
+          rawValues.push(...trimmed.split(/[;,]/g));
+        }
+      } catch {
+        rawValues.push(...trimmed.split(/[;,]/g));
+      }
+    }
+  }
+
+  const allowed = new Set(PROJECT_VIEW_ACCESS_KEYS);
+  const unique = [];
+  const seen = new Set();
+  rawValues.forEach((value) => {
+    const viewKey = String(value || "").trim();
+    if (!allowed.has(viewKey) || seen.has(viewKey)) {
+      return;
+    }
+    seen.add(viewKey);
+    unique.push(viewKey);
+  });
+
+  if (unique.length === 0 && defaultAll) {
+    return [...DEFAULT_PROJECT_VIEW_ACCESS_KEYS];
+  }
+  return unique;
+}
+
+function normalizeViewAccessByProjectInput(viewAccessInput, projectIdsInput, roleInput = "viewer") {
+  const role = String(roleInput || "").trim().toLowerCase();
+  if (role === "superadmin") {
+    return {
+      "*": [...DEFAULT_PROJECT_VIEW_ACCESS_KEYS],
+    };
+  }
+
+  const projectIds = normalizeProjectIdsInput(projectIdsInput, { allowWildcard: false });
+  const rawAccess = parseJsonObject(viewAccessInput) || {};
+  const normalized = {};
+
+  projectIds.forEach((projectId) => {
+    if (Object.prototype.hasOwnProperty.call(rawAccess, projectId)) {
+      normalized[projectId] = normalizeProjectViewKeysInput(rawAccess[projectId]);
+    } else {
+      normalized[projectId] = [...DEFAULT_PROJECT_VIEW_ACCESS_KEYS];
+    }
+  });
+
+  return normalized;
 }
 
 function userCanAccessAllProjects(user) {

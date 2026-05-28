@@ -103,6 +103,16 @@ const AUDIT_FILTER_CONFIGS = {
 };
 const USER_ROLE_OPTIONS = ["viewer", "editor", "admin", "superadmin"];
 const USER_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USER_PROJECT_VIEW_OPTIONS = [
+  { key: "itemizado", label: "Itemizado" },
+  { key: "presupuesto", label: "Presupuesto" },
+  { key: "control-bim", label: "Control BIM" },
+  { key: "auditoria", label: "Auditoria" },
+  { key: "exportaciones-rvt", label: "RVT" },
+  { key: "exportacion-presupuesto", label: "Presupuesto XLS" },
+];
+const USER_PROJECT_VIEW_KEYS = USER_PROJECT_VIEW_OPTIONS.map((option) => option.key);
+const DEFAULT_USER_PROJECT_VIEW_KEYS = [...USER_PROJECT_VIEW_KEYS];
 const EXPORT_COLUMN_SCHEMAS = {
   rvt: [
     { key: "codificacion", header: "CODIFICACION", width: 22, type: "text" },
@@ -973,6 +983,15 @@ if (usersPanel) {
       return;
     }
 
+    if (action === "toggle-project-view") {
+      await toggleUserProjectViewAccess(
+        actionElement.dataset.userEmail,
+        actionElement.dataset.viewKey,
+        Boolean(actionElement.checked),
+      );
+      return;
+    }
+
     if (action === "edit") {
       const email = String(actionElement.dataset.userEmail || "").trim().toLowerCase();
       startUsersEdit(email);
@@ -1148,8 +1167,10 @@ function switchView(view) {
     return;
   }
 
-  if (view === "usuarios" && !isUsersViewAllowed()) {
-    usersState.error = "Solo superadmin puede abrir el panel de usuarios.";
+  if (!canCurrentUserAccessView(view)) {
+    usersState.error = view === "usuarios"
+      ? "Solo superadmin puede abrir el panel de usuarios."
+      : "Esta vista no esta activa para tu usuario en este proyecto.";
     usersState.info = "";
     updateViewUi();
     return;
@@ -1162,6 +1183,7 @@ function switchView(view) {
 }
 
 function render() {
+  ensureCurrentViewAccess();
   const viewConfig = getCurrentViewConfig();
   const filterQuery =
     viewConfig.contentType === "table" || viewConfig.contentType === "audit"
@@ -1821,6 +1843,54 @@ function isUsersViewAllowed() {
   return getCurrentUserRole() === "superadmin";
 }
 
+function getCurrentUserProjectViewKeys(projectIdInput = state.currentProjectId) {
+  if (!authState.required || !authState.user) {
+    return [...DEFAULT_USER_PROJECT_VIEW_KEYS];
+  }
+
+  if (getCurrentUserRole() === "superadmin") {
+    return [...DEFAULT_USER_PROJECT_VIEW_KEYS];
+  }
+
+  const projectId = String(projectIdInput || "").trim();
+  if (!projectId) {
+    return [];
+  }
+  return getUserProjectViewKeys(authState.user, projectId);
+}
+
+function canCurrentUserAccessView(viewKey) {
+  if (!VIEW_CONFIGS[viewKey]) {
+    return false;
+  }
+
+  if (viewKey === "usuarios") {
+    return isUsersViewAllowed();
+  }
+
+  if (!USER_PROJECT_VIEW_KEYS.includes(viewKey)) {
+    return true;
+  }
+
+  return getCurrentUserProjectViewKeys().includes(viewKey);
+}
+
+function getFirstAllowedViewKey() {
+  const firstProjectView = USER_PROJECT_VIEW_KEYS.find((viewKey) => canCurrentUserAccessView(viewKey));
+  if (firstProjectView) {
+    return firstProjectView;
+  }
+  return isUsersViewAllowed() ? "usuarios" : "itemizado";
+}
+
+function ensureCurrentViewAccess() {
+  if (canCurrentUserAccessView(state.currentView)) {
+    return;
+  }
+  state.currentView = getFirstAllowedViewKey();
+  persistUiState();
+}
+
 function isProjectCreationAllowed() {
   if (!authState.required) {
     return true;
@@ -1829,16 +1899,11 @@ function isProjectCreationAllowed() {
 }
 
 function applyUsersViewAccess() {
-  const canAccessUsers = isUsersViewAllowed();
-  if (usersViewButton) {
-    usersViewButton.hidden = !canAccessUsers;
-  }
+  viewButtons.forEach((button) => {
+    button.hidden = !canCurrentUserAccessView(button.dataset.view);
+  });
 
-  if (!canAccessUsers && state.currentView === "usuarios") {
-    state.currentView = "itemizado";
-    persistUiState();
-    render();
-  }
+  ensureCurrentViewAccess();
 }
 
 function normalizeUserRole(roleInput) {
@@ -1886,6 +1951,76 @@ function normalizeUsersProjectIds(projectIdsInput, { allowWildcard = false } = {
   if (allowWildcard && normalized.includes("*")) {
     return ["*"];
   }
+  return normalized;
+}
+
+function normalizeUsersProjectViewKeys(viewKeysInput, { defaultAll = false } = {}) {
+  const rawValues = [];
+  if (Array.isArray(viewKeysInput)) {
+    rawValues.push(...viewKeysInput);
+  } else if (typeof viewKeysInput === "string") {
+    const trimmed = viewKeysInput.trim();
+    if (trimmed) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          rawValues.push(...parsed);
+        } else {
+          rawValues.push(...trimmed.split(/[;,]/g));
+        }
+      } catch {
+        rawValues.push(...trimmed.split(/[;,]/g));
+      }
+    }
+  }
+
+  const allowed = new Set(USER_PROJECT_VIEW_KEYS);
+  const normalized = [];
+  const seen = new Set();
+  rawValues.forEach((value) => {
+    const viewKey = String(value || "").trim();
+    if (!allowed.has(viewKey) || seen.has(viewKey)) {
+      return;
+    }
+    seen.add(viewKey);
+    normalized.push(viewKey);
+  });
+
+  if (normalized.length === 0 && defaultAll) {
+    return [...DEFAULT_USER_PROJECT_VIEW_KEYS];
+  }
+  return normalized;
+}
+
+function normalizeUsersViewAccessByProject(viewAccessInput, projectIdsInput, roleInput = "viewer") {
+  const role = normalizeUserRole(roleInput);
+  if (role === "superadmin") {
+    return {
+      "*": [...DEFAULT_USER_PROJECT_VIEW_KEYS],
+    };
+  }
+
+  let rawAccess = viewAccessInput;
+  if (typeof rawAccess === "string") {
+    try {
+      rawAccess = JSON.parse(rawAccess || "{}");
+    } catch {
+      rawAccess = {};
+    }
+  }
+  if (!rawAccess || typeof rawAccess !== "object" || Array.isArray(rawAccess)) {
+    rawAccess = {};
+  }
+
+  const projectIds = normalizeUsersProjectIds(projectIdsInput, { allowWildcard: false });
+  const normalized = {};
+  projectIds.forEach((projectId) => {
+    if (Object.prototype.hasOwnProperty.call(rawAccess, projectId)) {
+      normalized[projectId] = normalizeUsersProjectViewKeys(rawAccess[projectId]);
+    } else {
+      normalized[projectId] = [...DEFAULT_USER_PROJECT_VIEW_KEYS];
+    }
+  });
   return normalized;
 }
 
@@ -1967,6 +2102,35 @@ function userHasDirectProjectAccess(entry, projectId) {
     return false;
   }
   return getUsersProjectIdsForEntry(entry).includes(projectId);
+}
+
+function getUserViewAccessByProject(entry) {
+  const role = normalizeUserRole(entry?.role);
+  const projectIds = role === "superadmin"
+    ? ["*"]
+    : getUsersProjectIdsForEntry(entry);
+  return normalizeUsersViewAccessByProject(entry?.viewAccessByProject, projectIds, role);
+}
+
+function getUserProjectViewKeys(entry, projectId) {
+  const role = normalizeUserRole(entry?.role);
+  if (role === "superadmin") {
+    return [...DEFAULT_USER_PROJECT_VIEW_KEYS];
+  }
+
+  if (!userHasAccessToProject(entry, projectId)) {
+    return [];
+  }
+
+  const viewAccessByProject = getUserViewAccessByProject(entry);
+  if (Object.prototype.hasOwnProperty.call(viewAccessByProject, projectId)) {
+    return normalizeUsersProjectViewKeys(viewAccessByProject[projectId]);
+  }
+  return [...DEFAULT_USER_PROJECT_VIEW_KEYS];
+}
+
+function userHasProjectView(entry, projectId, viewKey) {
+  return getUserProjectViewKeys(entry, projectId).includes(viewKey);
 }
 
 function getProjectMembers(projectId) {
@@ -2124,6 +2288,7 @@ function getUsersDraftDisplayName(draft) {
 function createUsersMemberDraft(emailInput, existingUser = null) {
   const email = String(emailInput || "").trim().toLowerCase();
   const splitName = splitUsersDisplayName(existingUser?.displayName, email);
+  const selectedProject = getUsersSelectedProject();
   return {
     id: `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     email,
@@ -2132,6 +2297,9 @@ function createUsersMemberDraft(emailInput, existingUser = null) {
     company: getCompanyFromUsersEmail(email),
     role: normalizeUserRole(existingUser?.role || "viewer"),
     active: existingUser ? existingUser.active !== false : true,
+    viewKeys: selectedProject && existingUser
+      ? getUserProjectViewKeys(existingUser, selectedProject.id)
+      : [...DEFAULT_USER_PROJECT_VIEW_KEYS],
     existing: Boolean(existingUser),
   };
 }
@@ -2214,6 +2382,21 @@ function handleUsersDraftInputEvent(event) {
     return;
   }
 
+  if (field === "view") {
+    const viewKey = String(fieldElement.dataset.viewKey || "");
+    if (!USER_PROJECT_VIEW_KEYS.includes(viewKey)) {
+      return;
+    }
+    const current = new Set(normalizeUsersProjectViewKeys(draft.viewKeys));
+    if (fieldElement.checked) {
+      current.add(viewKey);
+    } else {
+      current.delete(viewKey);
+    }
+    draft.viewKeys = USER_PROJECT_VIEW_KEYS.filter((key) => current.has(key));
+    return;
+  }
+
   if (field === "role") {
     draft.role = normalizeUserRole(fieldElement.value);
     return;
@@ -2239,6 +2422,18 @@ function syncUsersMemberDraftsFromDom() {
       const field = String(fieldElement.dataset.usersDraftField || "");
       if (field === "active") {
         draft.active = Boolean(fieldElement.checked);
+      } else if (field === "view") {
+        const viewKey = String(fieldElement.dataset.viewKey || "");
+        if (!USER_PROJECT_VIEW_KEYS.includes(viewKey)) {
+          return;
+        }
+        const current = new Set(normalizeUsersProjectViewKeys(draft.viewKeys));
+        if (fieldElement.checked) {
+          current.add(viewKey);
+        } else {
+          current.delete(viewKey);
+        }
+        draft.viewKeys = USER_PROJECT_VIEW_KEYS.filter((key) => current.has(key));
       } else if (field === "role") {
         draft.role = normalizeUserRole(fieldElement.value);
       } else if (field) {
@@ -2246,6 +2441,35 @@ function syncUsersMemberDraftsFromDom() {
       }
     });
   });
+}
+
+function buildUserViewAccessByProject(user, projectIdsInput, roleInput, projectIdInput, viewKeysInput) {
+  const role = normalizeUserRole(roleInput);
+  if (role === "superadmin") {
+    return {
+      "*": [...DEFAULT_USER_PROJECT_VIEW_KEYS],
+    };
+  }
+
+  const projectIds = normalizeUsersProjectIds(projectIdsInput, { allowWildcard: false });
+  const existingAccess = normalizeUsersViewAccessByProject(
+    user?.viewAccessByProject,
+    projectIds,
+    role,
+  );
+  const nextAccess = {};
+  projectIds.forEach((projectId) => {
+    nextAccess[projectId] = Object.prototype.hasOwnProperty.call(existingAccess, projectId)
+      ? normalizeUsersProjectViewKeys(existingAccess[projectId])
+      : [...DEFAULT_USER_PROJECT_VIEW_KEYS];
+  });
+
+  const projectId = String(projectIdInput || "").trim();
+  if (projectId && projectIds.includes(projectId)) {
+    nextAccess[projectId] = normalizeUsersProjectViewKeys(viewKeysInput);
+  }
+
+  return nextAccess;
 }
 
 function getUsersEditingRecord() {
@@ -2416,6 +2640,22 @@ function renderUsersAddMembersPanel(project, feedback) {
   const draftRows = usersState.memberDrafts
     .map((draft, index) => {
       const role = normalizeUserRole(draft.role);
+      const draftViewKeys = new Set(normalizeUsersProjectViewKeys(draft.viewKeys, { defaultAll: true }));
+      const viewCells = USER_PROJECT_VIEW_OPTIONS
+        .map((viewOption) => `
+          <td class="users-module-cell">
+            <label class="users-module-toggle" title="${escapeHtml(viewOption.label)}">
+              <input
+                type="checkbox"
+                data-users-draft-field="view"
+                data-view-key="${escapeHtml(viewOption.key)}"
+                ${draftViewKeys.has(viewOption.key) ? "checked" : ""}
+              />
+              <span></span>
+            </label>
+          </td>
+        `)
+        .join("");
       return `
         <tr data-users-draft-row="${escapeHtml(draft.id)}">
           <td><input type="checkbox" checked aria-label="Seleccionar ${escapeHtml(draft.email)}" /></td>
@@ -2474,6 +2714,7 @@ function renderUsersAddMembersPanel(project, feedback) {
               <span>${draft.active ? "Activo" : "Inactivo"}</span>
             </label>
           </td>
+          ${viewCells}
           <td>
             <button
               type="button"
@@ -2549,6 +2790,9 @@ function renderUsersAddMembersPanel(project, feedback) {
                     <th>Empresa</th>
                     <th>Rol</th>
                     <th>Estado</th>
+                    ${USER_PROJECT_VIEW_OPTIONS
+                      .map((viewOption) => `<th class="users-module-head">${escapeHtml(viewOption.label)}</th>`)
+                      .join("")}
                     <th></th>
                   </tr>
                 </thead>
@@ -2590,6 +2834,28 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
       const activeClass = entry.active !== false ? "is-active" : "is-inactive";
       const scopeLabel = entryRole === "superadmin" ? "Acceso total" : "Miembro directo";
       const canRemove = entryRole !== "superadmin" && userHasDirectProjectAccess(entry, project.id);
+      const projectViewKeys = new Set(getUserProjectViewKeys(entry, project.id));
+      const viewCells = USER_PROJECT_VIEW_OPTIONS
+        .map((viewOption) => {
+          const checked = projectViewKeys.has(viewOption.key) ? "checked" : "";
+          const disabled = entryRole === "superadmin" || usersState.saving ? "disabled" : "";
+          return `
+            <td class="users-module-cell">
+              <label class="users-module-toggle" title="${escapeHtml(viewOption.label)}">
+                <input
+                  type="checkbox"
+                  data-users-action="toggle-project-view"
+                  data-user-email="${escapeHtml(entry.email || "")}"
+                  data-view-key="${escapeHtml(viewOption.key)}"
+                  ${checked}
+                  ${disabled}
+                />
+                <span></span>
+              </label>
+            </td>
+          `;
+        })
+        .join("");
 
       return `
         <tr class="${isEditing ? "is-selected" : ""}">
@@ -2606,6 +2872,7 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
           <td><span class="users-status users-status--${activeClass}">${activeLabel}</span></td>
           <td class="users-project-scope-cell" title="${escapeHtml(projectScopeLabel)}">${escapeHtml(scopeLabel)}</td>
           <td>${escapeHtml(formatUsersDate(entry.updatedAt || entry.createdAt))}</td>
+          ${viewCells}
           <td>
             <div class="users-row-actions">
               ${
@@ -2701,6 +2968,9 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
                         <th>Estado</th>
                         <th>Alcance</th>
                         <th>Actualizado</th>
+                        ${USER_PROJECT_VIEW_OPTIONS
+                          .map((viewOption) => `<th class="users-module-head">${escapeHtml(viewOption.label)}</th>`)
+                          .join("")}
                         <th>Accion</th>
                       </tr>
                     </thead>
@@ -2788,16 +3058,25 @@ async function loadUsersForPanel({ force = false } = {}) {
 
     usersState.items = Array.isArray(payload.users)
       ? payload.users
-        .map((entry) => ({
-          ...entry,
-          email: String(entry?.email || "").trim().toLowerCase(),
-          displayName: String(entry?.displayName || "").trim(),
-          role: normalizeUserRole(entry?.role),
-          active: entry?.active !== false,
-          projectIds: normalizeUserRole(entry?.role) === "superadmin"
+        .map((entry) => {
+          const role = normalizeUserRole(entry?.role);
+          const projectIds = role === "superadmin"
             ? ["*"]
-            : normalizeUsersProjectIds(entry?.projectIds, { allowWildcard: false }),
-        }))
+            : normalizeUsersProjectIds(entry?.projectIds, { allowWildcard: false });
+          return {
+            ...entry,
+            email: String(entry?.email || "").trim().toLowerCase(),
+            displayName: String(entry?.displayName || "").trim(),
+            role,
+            active: entry?.active !== false,
+            projectIds,
+            viewAccessByProject: normalizeUsersViewAccessByProject(
+              entry?.viewAccessByProject,
+              projectIds,
+              role,
+            ),
+          };
+        })
         .sort((left, right) => left.email.localeCompare(right.email))
       : [];
     usersState.projects = normalizeUsersProjectOptions(payload?.projects);
@@ -2865,11 +3144,17 @@ async function handleUsersFormSubmit(formElement) {
   renderUsersPanel();
 
   try {
+    const existingUser = usersState.items.find((entry) => entry.email === email) || null;
     const payload = {
       email,
       displayName,
       role,
       projectIds,
+      viewAccessByProject: normalizeUsersViewAccessByProject(
+        existingUser?.viewAccessByProject,
+        projectIds,
+        role,
+      ),
       active,
     };
 
@@ -2951,6 +3236,17 @@ async function saveUsersMemberDrafts() {
     return;
   }
 
+  const noViewDraft = usersState.memberDrafts.find((draft) => (
+    normalizeUserRole(draft.role) !== "superadmin"
+    && normalizeUsersProjectViewKeys(draft.viewKeys).length === 0
+  ));
+  if (noViewDraft) {
+    usersState.error = `Activa al menos una vista para ${noViewDraft.email}.`;
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
   usersState.saving = true;
   usersState.error = "";
   usersState.info = "";
@@ -2975,6 +3271,13 @@ async function saveUsersMemberDrafts() {
           ...normalizeUsersProjectIds(existingUser?.projectIds, { allowWildcard: false }),
           selectedProject.id,
         ], { allowWildcard: false });
+      const viewAccessByProject = buildUserViewAccessByProject(
+        existingUser,
+        projectIds,
+        requestedRole,
+        selectedProject.id,
+        draft.viewKeys,
+      );
 
       const response = await window.fetch(AUTH_USERS_ENDPOINT, {
         method: "POST",
@@ -2988,6 +3291,7 @@ async function saveUsersMemberDrafts() {
           displayName,
           role: requestedRole,
           projectIds,
+          viewAccessByProject,
           active,
         }),
       });
@@ -3064,6 +3368,15 @@ async function handleProjectMemberFormSubmit(formElement) {
       ...normalizeUsersProjectIds(existingUser?.projectIds, { allowWildcard: false }),
       selectedProject.id,
     ], { allowWildcard: false });
+  const viewAccessByProject = buildUserViewAccessByProject(
+    existingUser,
+    projectIds,
+    requestedRole,
+    selectedProject.id,
+    selectedProject.id
+      ? getUserProjectViewKeys(existingUser || { role: requestedRole, projectIds }, selectedProject.id)
+      : DEFAULT_USER_PROJECT_VIEW_KEYS,
+  );
 
   if (requestedRole !== "superadmin" && active && projectIds.length === 0) {
     usersState.error = "Debes asignar al menos un proyecto al usuario activo.";
@@ -3090,6 +3403,7 @@ async function handleProjectMemberFormSubmit(formElement) {
         displayName,
         role: requestedRole,
         projectIds,
+        viewAccessByProject,
         active,
       }),
     });
@@ -3150,6 +3464,11 @@ async function removeUserFromSelectedProject(emailInput) {
 
   const nextProjectIds = currentProjectIds.filter((projectId) => projectId !== selectedProject.id);
   const nextActive = nextProjectIds.length > 0 && user.active !== false;
+  const nextViewAccess = normalizeUsersViewAccessByProject(
+    user.viewAccessByProject,
+    nextProjectIds,
+    role,
+  );
 
   usersState.saving = true;
   usersState.error = "";
@@ -3169,6 +3488,7 @@ async function removeUserFromSelectedProject(emailInput) {
         displayName: getUsersDisplayName(user),
         role,
         projectIds: nextProjectIds,
+        viewAccessByProject: nextViewAccess,
         active: nextActive,
       }),
     });
@@ -3191,6 +3511,109 @@ async function removeUserFromSelectedProject(emailInput) {
       error instanceof Error
         ? error.message
         : "No se pudo quitar el miembro del proyecto.";
+  } finally {
+    usersState.saving = false;
+    if (state.currentView === "usuarios") {
+      renderUsersPanel();
+    }
+  }
+}
+
+async function toggleUserProjectViewAccess(emailInput, viewKeyInput, enabled) {
+  if (!isUsersViewAllowed() || usersState.saving) {
+    return;
+  }
+
+  const selectedProject = getUsersSelectedProject();
+  const email = String(emailInput || "").trim().toLowerCase();
+  const viewKey = String(viewKeyInput || "").trim();
+  const user = usersState.items.find((entry) => entry.email === email) || null;
+
+  if (!selectedProject || !user || !USER_PROJECT_VIEW_KEYS.includes(viewKey)) {
+    usersState.error = "No se pudo actualizar la vista seleccionada.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const role = normalizeUserRole(user.role);
+  if (role === "superadmin") {
+    usersState.error = "El superadmin siempre tiene todas las vistas activas.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const projectIds = getUsersProjectIdsForEntry(user);
+  if (!projectIds.includes(selectedProject.id)) {
+    usersState.error = "El usuario no pertenece a este proyecto.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const currentViewKeys = new Set(getUserProjectViewKeys(user, selectedProject.id));
+  if (!enabled && currentViewKeys.size <= 1 && currentViewKeys.has(viewKey)) {
+    usersState.error = "El usuario debe conservar al menos una vista activa.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  if (enabled) {
+    currentViewKeys.add(viewKey);
+  } else {
+    currentViewKeys.delete(viewKey);
+  }
+  const nextViewKeys = USER_PROJECT_VIEW_KEYS.filter((key) => currentViewKeys.has(key));
+  const viewAccessByProject = buildUserViewAccessByProject(
+    user,
+    projectIds,
+    role,
+    selectedProject.id,
+    nextViewKeys,
+  );
+
+  usersState.saving = true;
+  usersState.error = "";
+  usersState.info = "";
+  renderUsersPanel();
+
+  try {
+    const response = await window.fetch(AUTH_USERS_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...getAuthHeaders(),
+      },
+      body: JSON.stringify({
+        email: user.email,
+        displayName: getUsersDisplayName(user),
+        role,
+        projectIds,
+        viewAccessByProject,
+        active: user.active !== false,
+      }),
+    });
+
+    if (response.status === 401) {
+      handleUnauthorizedAccess("Tu sesion vencio. Vuelve a iniciar sesion.");
+      return;
+    }
+
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result?.ok) {
+      throw new Error(result?.error || `Error ${response.status}`);
+    }
+
+    usersState.info = `${getUsersDisplayName(user)} actualizado en ${selectedProject.name}.`;
+    await loadUsersForPanel({ force: true });
+  } catch (error) {
+    usersState.error =
+      error instanceof Error
+        ? error.message
+        : "No se pudo actualizar la vista del usuario.";
   } finally {
     usersState.saving = false;
     if (state.currentView === "usuarios") {
@@ -4358,6 +4781,7 @@ function updateProjectUi() {
 function updateViewUi(viewConfig = getCurrentViewConfig()) {
   viewButtons.forEach((button) => {
     const isActive = button.dataset.view === viewConfig.key;
+    button.hidden = !canCurrentUserAccessView(button.dataset.view);
     button.classList.toggle("nav-item--active", isActive);
     button.setAttribute("aria-current", isActive ? "page" : "false");
   });
