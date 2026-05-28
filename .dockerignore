@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+node_modules
+dist
+data
+*.log
+local-server*.log
+visual-server*.log
+chrome-quantiva-profile
+quantiva-sidebar-check.png
+tsconfig.tsbuildinfo
