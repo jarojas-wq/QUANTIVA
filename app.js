@@ -561,6 +561,7 @@ const usersState = {
   info: "",
   editingEmail: "",
   selectedProjectId: "",
+  searchText: "",
   addMembersMode: false,
   memberEmailInput: "",
   memberDrafts: [],
@@ -1005,6 +1006,13 @@ if (usersPanel) {
   });
 
   usersPanel.addEventListener("input", (event) => {
+    const searchInputElement = event.target.closest("[data-users-search]");
+    if (searchInputElement) {
+      usersState.searchText = String(searchInputElement.value || "");
+      renderUsersPanel();
+      return;
+    }
+
     handleUsersDraftInputEvent(event);
   });
 
@@ -1830,6 +1838,7 @@ function resetUsersState() {
   usersState.info = "";
   usersState.editingEmail = "";
   usersState.selectedProjectId = "";
+  usersState.searchText = "";
   resetUsersAddMembersState();
   usersState.loadedForToken = "";
   usersState.loaded = false;
@@ -2159,6 +2168,48 @@ function getUsersDisplayName(entry) {
   return email ? email.split("@")[0] : "Usuario";
 }
 
+function normalizeUsersSearchText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function getProjectCodeForUsers(project, index = 0) {
+  const projectName = String(project?.name || "Proyecto").trim();
+  const initials = projectName
+    .split(/\s+/g)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join("");
+  return `${initials || "PR"}-${String(index + 1).padStart(2, "0")}`;
+}
+
+function getProjectModulesLabel() {
+  return USER_PROJECT_VIEW_OPTIONS.map((option) => option.label).join(", ");
+}
+
+function getUsersCompanyLabel(entry) {
+  const email = String(entry?.email || "");
+  const company = getCompanyFromUsersEmail(email);
+  return company || "-";
+}
+
+function formatUsersShortDate(timestampInput) {
+  const timestamp = new Date(timestampInput);
+  if (Number.isNaN(timestamp.getTime())) {
+    return "-";
+  }
+
+  return timestamp.toLocaleDateString("es-PE", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
 function getProjectMembershipSummary(projectId) {
   const members = getProjectMembers(projectId);
   const directMembers = members.filter((entry) => userHasDirectProjectAccess(entry, projectId));
@@ -2185,6 +2236,7 @@ function selectUsersProject(projectIdInput) {
   usersState.selectedProjectId = projectId;
   usersState.editingEmail = "";
   resetUsersAddMembersState();
+  usersState.searchText = "";
   usersState.error = "";
   usersState.info = "";
   renderUsersPanel();
@@ -2540,33 +2592,47 @@ function renderUsersPanel() {
 }
 
 function renderUsersProjectsPanel(feedback) {
-  const rows = usersState.projects
-    .map((project) => {
+  const searchText = normalizeUsersSearchText(usersState.searchText);
+  const projects = usersState.projects.filter((project, index) => {
+    if (!searchText) {
+      return true;
+    }
+    const summary = getProjectMembershipSummary(project.id);
+    const haystack = normalizeUsersSearchText([
+      project.name,
+      project.id,
+      getProjectCodeForUsers(project, index),
+      getProjectModulesLabel(),
+      summary.direct,
+    ].join(" "));
+    return haystack.includes(searchText);
+  });
+  const rows = projects
+    .map((project, index) => {
       const summary = getProjectMembershipSummary(project.id);
+      const code = getProjectCodeForUsers(project, index);
       return `
         <tr class="users-project-row" data-users-action="select-project" data-project-id="${escapeHtml(project.id)}">
           <td class="users-project-name-cell">
-            <span class="users-project-icon">Q</span>
+            <span class="users-project-icon" aria-hidden="true"></span>
             <span class="users-project-name-copy">
               <strong>${escapeHtml(project.name)}</strong>
-              <small>${escapeHtml(project.id)}</small>
+              <small>Proyecto de Quantiva</small>
             </span>
           </td>
-          <td><span class="users-project-type-pill">Proyecto</span></td>
+          <td>${escapeHtml(code)}</td>
+          <td><span class="users-project-type-pill">Interno</span></td>
           <td>
             <div class="users-project-access-copy">
               <strong>Lista manual</strong>
-              <span>Por miembros asignados</span>
+              <span>Miembros por proyecto</span>
             </div>
           </td>
+          <td class="users-project-route-cell" title="${escapeHtml(project.id)}">${escapeHtml(project.id)}</td>
+          <td class="users-project-modules-cell">${escapeHtml(getProjectModulesLabel())}</td>
           <td>${summary.direct}</td>
-          <td>${summary.superadmins}</td>
           <td><span class="users-status users-status--is-active">Activo</span></td>
-          <td>
-            <button type="button" class="topbar-button" data-users-action="select-project" data-project-id="${escapeHtml(project.id)}">
-              Administrar
-            </button>
-          </td>
+          <td>${escapeHtml(formatUsersShortDate(project.createdAt))}</td>
         </tr>
       `;
     })
@@ -2575,26 +2641,23 @@ function renderUsersProjectsPanel(feedback) {
   usersPanel.innerHTML = `
     <div class="users-admin-view">
       <div class="users-page-header">
-        <div>
-          <span class="users-kicker">Control de accesos</span>
-          <h2>Proyectos</h2>
-          <p>Selecciona un proyecto para revisar sus miembros y administrar accesos.</p>
-        </div>
-        <button type="button" class="topbar-button" data-users-action="refresh" ${usersState.loading ? "disabled" : ""}>
-          Actualizar
-        </button>
+        <h2>Proyectos</h2>
       </div>
 
       ${feedback}
 
-      <div class="users-toolbar">
-        <div class="users-toolbar-summary">
-          <strong>${usersState.projects.length}</strong>
-          <span>proyectos disponibles</span>
-        </div>
-        <div class="users-toolbar-summary">
-          <strong>${usersState.items.length}</strong>
-          <span>usuarios registrados</span>
+      <div class="users-toolbar users-toolbar--solo-search">
+        <div class="users-toolbar-right">
+          <label class="users-search-box">
+            <span aria-hidden="true"></span>
+            <input
+              type="text"
+              data-users-search
+              value="${escapeHtml(usersState.searchText)}"
+              placeholder="Buscar por nombre del proyecto"
+            />
+          </label>
+          <button type="button" class="users-btn-icon" aria-label="Filtrar proyectos"></button>
         </div>
       </div>
 
@@ -2614,17 +2677,19 @@ function renderUsersProjectsPanel(feedback) {
               </div>
             `
             : `
-              <div class="users-table-wrap users-project-table-wrap">
+              <div class="users-table-wrap users-table-wrap--erp users-project-table-wrap">
                 <table class="users-table users-project-table">
                   <thead>
                     <tr>
                       <th>Nombre</th>
+                      <th>Codigo</th>
                       <th>Tipo</th>
-                      <th>Acceso</th>
+                      <th>Acceso por defecto</th>
+                      <th>Proyecto / UID</th>
+                      <th>Vistas</th>
                       <th>Miembros</th>
-                      <th>Superadmins</th>
                       <th>Estado</th>
-                      <th>Accion</th>
+                      <th>Creado el</th>
                     </tr>
                   </thead>
                   <tbody>${rows}</tbody>
@@ -2732,17 +2797,14 @@ function renderUsersAddMembersPanel(project, feedback) {
     .join("");
 
   usersPanel.innerHTML = `
-    <div class="users-admin-view users-admin-view--add-members">
+    <div class="users-admin-view users-admin-view--add-members users-admin-view--focused">
       <div class="users-page-header">
         <div>
           <div class="users-breadcrumb">
-            <button type="button" data-users-action="back-projects">Proyectos</button>
-            <span>/</span>
-            <button type="button" data-users-action="cancel-add-members">${escapeHtml(project.name)}</button>
+            <button type="button" data-users-action="cancel-add-members">Miembros del proyecto</button>
             <span>/</span>
           </div>
           <h2>Anadir miembros al proyecto</h2>
-          <p>${escapeHtml(project.name)}</p>
         </div>
       </div>
 
@@ -2767,19 +2829,12 @@ function renderUsersAddMembersPanel(project, feedback) {
             Intro
           </button>
         </div>
-
-        <div class="users-manual-entry-panel">
-          <div>
-            <strong>Ingreso manual</strong>
-            <span>Agrega correos y completa nombre, empresa, estado y rol antes de guardar.</span>
-          </div>
-        </div>
       </div>
 
       ${
         usersState.memberDrafts.length > 0
           ? `
-            <div class="users-table-wrap users-drafts-table-wrap">
+            <div class="users-table-wrap users-table-wrap--erp users-drafts-table-wrap">
               <table class="users-table users-drafts-table">
                 <thead>
                   <tr>
@@ -2821,9 +2876,20 @@ function renderUsersAddMembersPanel(project, feedback) {
 }
 
 function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
-  const members = getProjectMembers(project.id);
-  const summary = getProjectMembershipSummary(project.id);
-
+  const searchText = normalizeUsersSearchText(usersState.searchText);
+  const members = getProjectMembers(project.id)
+    .filter((entry) => {
+      if (!searchText) {
+        return true;
+      }
+      const haystack = normalizeUsersSearchText([
+        getUsersDisplayName(entry),
+        entry.email,
+        getUsersCompanyLabel(entry),
+        getUserRoleLabel(entry.role),
+      ].join(" "));
+      return haystack.includes(searchText);
+    });
   const memberRows = members
     .map((entry) => {
       const rowEmail = String(entry.email || "").trim().toLowerCase();
@@ -2864,14 +2930,15 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
               <span class="users-member-avatar">${escapeHtml(getUserInitials(entry))}</span>
               <span>
                 <strong>${escapeHtml(getUsersDisplayName(entry))}</strong>
-                <small>${escapeHtml(entry.email || "")}</small>
               </span>
             </div>
           </td>
-          <td><span class="users-role-pill">${escapeHtml(getUserRoleLabel(entryRole))}</span></td>
+          <td>${escapeHtml(entry.email || "")}</td>
+          <td>-</td>
           <td><span class="users-status users-status--${activeClass}">${activeLabel}</span></td>
-          <td class="users-project-scope-cell" title="${escapeHtml(projectScopeLabel)}">${escapeHtml(scopeLabel)}</td>
-          <td>${escapeHtml(formatUsersDate(entry.updatedAt || entry.createdAt))}</td>
+          <td>${escapeHtml(getUsersCompanyLabel(entry))}</td>
+          <td><span class="users-role-pill" title="${escapeHtml(projectScopeLabel)}">${escapeHtml(getUserRoleLabel(entryRole))}</span></td>
+          <td>${escapeHtml(formatUsersShortDate(entry.createdAt || entry.updatedAt))}</td>
           ${viewCells}
           <td>
             <div class="users-row-actions">
@@ -2880,20 +2947,22 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
                   ? `
                     <button
                       type="button"
-                      class="topbar-button"
+                      class="users-btn-icon-subtle"
                       data-users-action="edit"
                       data-user-email="${escapeHtml(entry.email || "")}"
+                      aria-label="Editar ${escapeHtml(entry.email || "")}"
                     >
-                      Editar
+                      ...
                     </button>
                     <button
                       type="button"
-                      class="topbar-button topbar-button--danger"
+                      class="users-btn-icon-subtle users-btn-icon-subtle--danger"
                       data-users-action="remove-project-member"
                       data-user-email="${escapeHtml(entry.email || "")}"
+                      aria-label="Quitar ${escapeHtml(entry.email || "")}"
                       ${usersState.saving ? "disabled" : ""}
                     >
-                      Quitar
+                      x
                     </button>
                   `
                   : `<span class="users-action-muted">Acceso total</span>`
@@ -2915,34 +2984,36 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
             <strong>${escapeHtml(project.name)}</strong>
           </div>
           <h2>Miembros del proyecto</h2>
-          <p>Administra quienes pueden ver o editar este proyecto dentro de Quantiva.</p>
         </div>
-        <button type="button" class="topbar-button" data-users-action="refresh" ${usersState.loading ? "disabled" : ""}>
-          Actualizar
-        </button>
       </div>
 
       ${feedback}
 
       <div class="users-toolbar">
-        <button type="button" class="topbar-button topbar-button--primary" data-users-action="new-member">
-          Anadir miembros
-        </button>
-        <div class="users-toolbar-summary">
-          <strong>${summary.active}</strong>
-          <span>miembros activos</span>
+        <div class="users-toolbar-left">
+          <div class="users-btn-group">
+            <button type="button" class="users-btn users-btn-primary" data-users-action="new-member">
+              Anadir miembros
+            </button>
+            <button type="button" class="users-btn users-btn-primary users-btn-icon-only" data-users-action="new-member" aria-label="Opciones de anadir miembros">⌄</button>
+          </div>
         </div>
-        <div class="users-toolbar-summary">
-          <strong>${summary.direct}</strong>
-          <span>asignados directo</span>
+        <div class="users-toolbar-right">
+          <button type="button" class="users-btn users-btn-secondary">Exportar</button>
+          <label class="users-search-box">
+            <span aria-hidden="true"></span>
+            <input
+              type="text"
+              data-users-search
+              value="${escapeHtml(usersState.searchText)}"
+              placeholder="Buscar miembros por nombre o correo"
+            />
+          </label>
+          <button type="button" class="users-btn-icon" aria-label="Filtrar miembros"></button>
         </div>
       </div>
 
       <section class="users-card users-member-list-card users-member-list-card--full">
-        <div class="users-card-head">
-          <strong>${escapeHtml(project.name)}</strong>
-          <span class="users-count-pill">${members.length}</span>
-        </div>
         ${
           usersState.loading && !usersState.loaded
             ? `
@@ -2959,19 +3030,21 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
                 </div>
               `
               : `
-                <div class="users-table-wrap">
+                <div class="users-table-wrap users-table-wrap--erp">
                   <table class="users-table users-members-table">
                     <thead>
                       <tr>
                         <th>Nombre</th>
-                        <th>Rol</th>
+                        <th>Correo electronico</th>
+                        <th>Telefono</th>
                         <th>Estado</th>
-                        <th>Alcance</th>
-                        <th>Actualizado</th>
+                        <th>Empresa</th>
+                        <th>Rol / Funcion</th>
+                        <th>Anadido el</th>
                         ${USER_PROJECT_VIEW_OPTIONS
                           .map((viewOption) => `<th class="users-module-head">${escapeHtml(viewOption.label)}</th>`)
                           .join("")}
-                        <th>Accion</th>
+                        <th class="users-settings-head"></th>
                       </tr>
                     </thead>
                     <tbody>${memberRows}</tbody>
@@ -2980,6 +3053,9 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
               `
         }
       </section>
+      <div class="users-pagination-info">
+        Mostrando ${members.length > 0 ? 1 : 0}-${members.length} de ${members.length}
+      </div>
     </div>
   `;
 }
