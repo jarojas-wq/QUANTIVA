@@ -440,13 +440,13 @@ const VIEW_CONFIGS = {
   usuarios: {
     key: "usuarios",
     label: "Usuarios",
-    matrixTitle: "Gestion de usuarios",
+    matrixTitle: "Proyectos y usuarios",
     contentType: "users",
     searchEnabled: false,
     helperText:
-      "Solo superadmin puede crear, editar, activar o desactivar usuarios del sistema.",
+      "Selecciona un proyecto para revisar sus miembros y administrar accesos.",
     shortcutText:
-      "Usa el formulario para agregar usuarios y la tabla para seleccionar uno existente.",
+      "Flujo de acceso: Proyectos -> Usuarios. Los cambios se guardan en MySQL.",
     allowsStructureEditing: false,
     columns: [],
   },
@@ -549,6 +549,7 @@ const usersState = {
   error: "",
   info: "",
   editingEmail: "",
+  selectedProjectId: "",
   loadedForToken: "",
   loaded: false,
 };
@@ -892,6 +893,13 @@ document.addEventListener("keydown", (event) => {
 
 if (usersPanel) {
   usersPanel.addEventListener("submit", async (event) => {
+    const projectMemberForm = event.target.closest("[data-users-project-member-form]");
+    if (projectMemberForm) {
+      event.preventDefault();
+      await handleProjectMemberFormSubmit(projectMemberForm);
+      return;
+    }
+
     const form = event.target.closest("[data-users-form]");
     if (!form) {
       return;
@@ -901,16 +909,37 @@ if (usersPanel) {
     await handleUsersFormSubmit(form);
   });
 
-  usersPanel.addEventListener("click", (event) => {
+  usersPanel.addEventListener("click", async (event) => {
     const actionElement = event.target.closest("[data-users-action]");
     if (!actionElement) {
       return;
     }
 
     const action = actionElement.dataset.usersAction;
-    if (action === "new") {
+    if (action === "refresh") {
+      await loadUsersForPanel({ force: true });
+      return;
+    }
+
+    if (action === "select-project") {
+      selectUsersProject(actionElement.dataset.projectId);
+      return;
+    }
+
+    if (action === "back-projects") {
+      usersState.selectedProjectId = "";
       usersState.editingEmail = "";
-      usersState.info = "Formulario listo para nuevo usuario.";
+      usersState.error = "";
+      usersState.info = "";
+      renderUsersPanel();
+      return;
+    }
+
+    if (action === "new" || action === "new-member") {
+      usersState.editingEmail = "";
+      usersState.info = action === "new-member"
+        ? "Formulario listo para anadir un miembro al proyecto."
+        : "Formulario listo para nuevo usuario.";
       usersState.error = "";
       renderUsersPanel();
       return;
@@ -920,6 +949,11 @@ if (usersPanel) {
       const email = String(actionElement.dataset.userEmail || "").trim().toLowerCase();
       startUsersEdit(email);
       return;
+    }
+
+    if (action === "remove-project-member") {
+      const email = String(actionElement.dataset.userEmail || "").trim().toLowerCase();
+      await removeUserFromSelectedProject(email);
     }
   });
 }
@@ -1737,6 +1771,7 @@ function resetUsersState() {
   usersState.error = "";
   usersState.info = "";
   usersState.editingEmail = "";
+  usersState.selectedProjectId = "";
   usersState.loadedForToken = "";
   usersState.loaded = false;
 }
@@ -1851,6 +1886,108 @@ function resolveUserProjectScopeLabel(entry, projectNameMap) {
     .join(", ");
 }
 
+function getUserRoleLabel(roleInput) {
+  const role = normalizeUserRole(roleInput);
+  if (role === "superadmin") {
+    return "Superadmin";
+  }
+  if (role === "admin") {
+    return "Admin";
+  }
+  if (role === "editor") {
+    return "Editor";
+  }
+  return "Viewer";
+}
+
+function getUsersSelectedProject() {
+  const selectedProjectId = String(usersState.selectedProjectId || "").trim();
+  if (!selectedProjectId) {
+    return null;
+  }
+  return usersState.projects.find((project) => project.id === selectedProjectId) || null;
+}
+
+function getUsersProjectIdsForEntry(entry, options = {}) {
+  const role = normalizeUserRole(entry?.role);
+  return normalizeUsersProjectIds(entry?.projectIds, {
+    allowWildcard: options.allowWildcard || role === "superadmin",
+  });
+}
+
+function userHasAccessToProject(entry, projectId) {
+  const role = normalizeUserRole(entry?.role);
+  if (role === "superadmin") {
+    return true;
+  }
+
+  const projectIds = getUsersProjectIdsForEntry(entry, { allowWildcard: true });
+  return projectIds.includes("*") || projectIds.includes(projectId);
+}
+
+function userHasDirectProjectAccess(entry, projectId) {
+  if (normalizeUserRole(entry?.role) === "superadmin") {
+    return false;
+  }
+  return getUsersProjectIdsForEntry(entry).includes(projectId);
+}
+
+function getProjectMembers(projectId) {
+  return usersState.items
+    .filter((entry) => userHasAccessToProject(entry, projectId))
+    .sort((left, right) => {
+      const leftRole = normalizeUserRole(left?.role);
+      const rightRole = normalizeUserRole(right?.role);
+      if (leftRole === "superadmin" && rightRole !== "superadmin") {
+        return -1;
+      }
+      if (leftRole !== "superadmin" && rightRole === "superadmin") {
+        return 1;
+      }
+      return String(left?.email || "").localeCompare(String(right?.email || ""));
+    });
+}
+
+function getUsersDisplayName(entry) {
+  const displayName = String(entry?.displayName || "").trim();
+  if (displayName) {
+    return displayName;
+  }
+
+  const email = String(entry?.email || "").trim();
+  return email ? email.split("@")[0] : "Usuario";
+}
+
+function getProjectMembershipSummary(projectId) {
+  const members = getProjectMembers(projectId);
+  const directMembers = members.filter((entry) => userHasDirectProjectAccess(entry, projectId));
+  const activeMembers = members.filter((entry) => entry?.active !== false);
+  const superadmins = members.filter((entry) => normalizeUserRole(entry?.role) === "superadmin");
+  return {
+    total: members.length,
+    direct: directMembers.length,
+    active: activeMembers.length,
+    superadmins: superadmins.length,
+  };
+}
+
+function selectUsersProject(projectIdInput) {
+  const projectId = String(projectIdInput || "").trim();
+  const exists = usersState.projects.some((project) => project.id === projectId);
+  if (!exists) {
+    usersState.error = "No se encontro el proyecto seleccionado.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  usersState.selectedProjectId = projectId;
+  usersState.editingEmail = "";
+  usersState.error = "";
+  usersState.info = "";
+  renderUsersPanel();
+}
+
 function getUsersEditingRecord() {
   const targetEmail = String(usersState.editingEmail || "").trim().toLowerCase();
   if (!targetEmail) {
@@ -1893,87 +2030,53 @@ function renderUsersPanel() {
     return;
   }
 
-  const editingUser = getUsersEditingRecord();
-  const email = editingUser ? String(editingUser.email || "") : "";
-  const displayName = editingUser ? String(editingUser.displayName || "") : "";
-  const role = normalizeUserRole(editingUser?.role || "viewer");
   const availableProjects = usersState.projects;
-  const selectedProjectIds = role === "superadmin"
-    ? ["*"]
-    : normalizeUsersProjectIds(editingUser?.projectIds, { allowWildcard: false });
-  const selectedProjectSet = new Set(selectedProjectIds);
   const projectNameMap = new Map(availableProjects.map((project) => [project.id, project.name]));
-  const activeChecked = editingUser ? editingUser.active !== false : true;
-  const submitLabel = usersState.saving
-    ? "Guardando..."
-    : editingUser
-      ? "Guardar cambios"
-      : "Crear usuario";
+  const feedback = usersState.error
+    ? `<p class="users-feedback users-feedback--error">${escapeHtml(usersState.error)}</p>`
+    : usersState.info
+      ? `<p class="users-feedback users-feedback--info">${escapeHtml(usersState.info)}</p>`
+      : "";
 
-  let projectsField = "";
-  let projectsHelpText = "Selecciona uno o mas proyectos para este usuario.";
-  if (role === "superadmin") {
-    projectsField = `
-      <p class="users-projects-note">
-        El rol SUPERADMIN tiene acceso total a todos los proyectos.
-      </p>
-    `;
-    projectsHelpText = "No requiere seleccion manual de proyectos.";
-  } else if (availableProjects.length === 0) {
-    projectsField = `
-      <p class="users-projects-note">
-        Aun no hay proyectos creados para asignar.
-      </p>
-    `;
-    projectsHelpText = "Cuando existan proyectos, podras asignarlos aqui.";
-  } else {
-    projectsField = `
-      <div class="users-projects-list">
-        ${availableProjects
-          .map((project) => {
-            const checked = selectedProjectSet.has(project.id) ? "checked" : "";
-            return `
-              <label class="users-checkbox-row users-checkbox-row--project">
-                <input
-                  type="checkbox"
-                  name="projectIds"
-                  value="${escapeHtml(project.id)}"
-                  ${checked}
-                />
-                <span>${escapeHtml(project.name)}</span>
-              </label>
-            `;
-          })
-          .join("")}
-      </div>
-    `;
+  const selectedProject = getUsersSelectedProject();
+  if (usersState.selectedProjectId && !selectedProject) {
+    usersState.selectedProjectId = "";
   }
 
-  const rows = usersState.items
-    .map((entry) => {
-      const rowEmail = String(entry.email || "").trim().toLowerCase();
-      const isEditing = rowEmail === String(usersState.editingEmail || "").trim().toLowerCase();
-      const roleLabel = normalizeUserRole(entry.role).toUpperCase();
-      const projectScopeLabel = resolveUserProjectScopeLabel(entry, projectNameMap);
-      const activeLabel = entry.active !== false ? "Activo" : "Inactivo";
-      const activeClass = entry.active !== false ? "is-active" : "is-inactive";
+  if (selectedProject) {
+    renderUsersProjectMembersPanel(selectedProject, projectNameMap, feedback);
+    return;
+  }
 
+  renderUsersProjectsPanel(feedback);
+}
+
+function renderUsersProjectsPanel(feedback) {
+  const rows = usersState.projects
+    .map((project) => {
+      const summary = getProjectMembershipSummary(project.id);
       return `
-        <tr class="${isEditing ? "is-selected" : ""}">
-          <td>${escapeHtml(entry.displayName || "")}</td>
-          <td>${escapeHtml(entry.email || "")}</td>
-          <td><span class="users-role-pill">${escapeHtml(roleLabel)}</span></td>
-          <td class="users-project-scope-cell" title="${escapeHtml(projectScopeLabel)}">${escapeHtml(projectScopeLabel)}</td>
-          <td><span class="users-status users-status--${activeClass}">${activeLabel}</span></td>
-          <td>${escapeHtml(formatUsersDate(entry.updatedAt))}</td>
+        <tr class="users-project-row" data-users-action="select-project" data-project-id="${escapeHtml(project.id)}">
+          <td class="users-project-name-cell">
+            <span class="users-project-icon">Q</span>
+            <span class="users-project-name-copy">
+              <strong>${escapeHtml(project.name)}</strong>
+              <small>${escapeHtml(project.id)}</small>
+            </span>
+          </td>
+          <td><span class="users-project-type-pill">Proyecto</span></td>
           <td>
-            <button
-              type="button"
-              class="topbar-button"
-              data-users-action="edit"
-              data-user-email="${escapeHtml(entry.email || "")}"
-            >
-              Editar
+            <div class="users-project-access-copy">
+              <strong>Lista manual</strong>
+              <span>Por miembros asignados</span>
+            </div>
+          </td>
+          <td>${summary.direct}</td>
+          <td>${summary.superadmins}</td>
+          <td><span class="users-status users-status--is-active">Activo</span></td>
+          <td>
+            <button type="button" class="topbar-button" data-users-action="select-project" data-project-id="${escapeHtml(project.id)}">
+              Administrar
             </button>
           </td>
         </tr>
@@ -1981,117 +2084,281 @@ function renderUsersPanel() {
     })
     .join("");
 
-  const feedback = usersState.error
-    ? `<p class="users-feedback users-feedback--error">${escapeHtml(usersState.error)}</p>`
-    : usersState.info
-      ? `<p class="users-feedback users-feedback--info">${escapeHtml(usersState.info)}</p>`
-      : "";
-
   usersPanel.innerHTML = `
-    <div class="users-panel-grid">
-      <section class="users-card">
-        <div class="users-card-head">
-          <strong>${editingUser ? "Editar usuario" : "Nuevo usuario"}</strong>
-          <button type="button" class="topbar-button" data-users-action="new">Nuevo</button>
+    <div class="users-admin-view">
+      <div class="users-page-header">
+        <div>
+          <span class="users-kicker">Control de accesos</span>
+          <h2>Proyectos</h2>
+          <p>Selecciona un proyecto para revisar sus miembros y administrar accesos.</p>
         </div>
-        <form class="users-form" data-users-form autocomplete="off">
-          <label for="users-display-name-input">Nombre</label>
-          <input
-            id="users-display-name-input"
-            name="displayName"
-            type="text"
-            required
-            maxlength="120"
-            value="${escapeHtml(displayName)}"
-            placeholder="Nombre visible"
-          />
+        <button type="button" class="topbar-button" data-users-action="refresh" ${usersState.loading ? "disabled" : ""}>
+          Actualizar
+        </button>
+      </div>
 
-          <label for="users-email-input">Correo</label>
-          <input
-            id="users-email-input"
-            name="email"
-            type="email"
-            required
-            maxlength="320"
-            value="${escapeHtml(email)}"
-            placeholder="usuario@dominio.com"
-            ${editingUser ? 'readonly aria-readonly="true"' : ""}
-          />
+      ${feedback}
 
-          <label for="users-role-select">Rol</label>
-          <select id="users-role-select" name="role">
-            ${USER_ROLE_OPTIONS
-              .map((option) => {
-                const selected = option === role ? " selected" : "";
-                return `<option value="${option}"${selected}>${option.toUpperCase()}</option>`;
-              })
-              .join("")}
-          </select>
-
-          <label>Proyectos asignados</label>
-          ${projectsField}
-          <p class="users-field-help">
-            ${escapeHtml(projectsHelpText)}
-          </p>
-
-          <label class="users-checkbox-row">
-            <input type="checkbox" name="active" ${activeChecked ? "checked" : ""} />
-            Usuario activo
-          </label>
-
-          <div class="users-form-actions">
-            <button
-              type="submit"
-              class="topbar-button topbar-button--primary"
-              ${usersState.saving ? "disabled" : ""}
-            >
-              ${submitLabel}
-            </button>
-          </div>
-        </form>
-        ${feedback}
-      </section>
-
-      <section class="users-card">
-        <div class="users-card-head">
-          <strong>Usuarios registrados</strong>
-          <span class="users-count-pill">${usersState.items.length}</span>
+      <div class="users-toolbar">
+        <div class="users-toolbar-summary">
+          <strong>${usersState.projects.length}</strong>
+          <span>proyectos disponibles</span>
         </div>
-        ${
-          usersState.loading
+        <div class="users-toolbar-summary">
+          <strong>${usersState.items.length}</strong>
+          <span>usuarios registrados</span>
+        </div>
+      </div>
+
+      ${
+        usersState.loading && !usersState.loaded
+          ? `
+            <div class="empty-state">
+              <strong>Cargando proyectos...</strong>
+              <p>Sincronizando usuarios y proyectos desde MySQL.</p>
+            </div>
+          `
+          : usersState.projects.length === 0
             ? `
               <div class="empty-state">
-                <strong>Cargando usuarios...</strong>
-                <p>Espera un momento mientras sincronizamos la lista.</p>
+                <strong>No hay proyectos disponibles</strong>
+                <p>Crea un proyecto primero para poder asignar miembros.</p>
               </div>
             `
-            : usersState.items.length === 0
+            : `
+              <div class="users-table-wrap users-project-table-wrap">
+                <table class="users-table users-project-table">
+                  <thead>
+                    <tr>
+                      <th>Nombre</th>
+                      <th>Tipo</th>
+                      <th>Acceso</th>
+                      <th>Miembros</th>
+                      <th>Superadmins</th>
+                      <th>Estado</th>
+                      <th>Accion</th>
+                    </tr>
+                  </thead>
+                  <tbody>${rows}</tbody>
+                </table>
+              </div>
+            `
+      }
+    </div>
+  `;
+}
+
+function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
+  const editingUser = getUsersEditingRecord();
+  const editableUser = editingUser && normalizeUserRole(editingUser?.role) !== "superadmin"
+    ? editingUser
+    : null;
+  const email = editableUser ? String(editableUser.email || "") : "";
+  const displayName = editableUser ? getUsersDisplayName(editableUser) : "";
+  const role = normalizeUserRole(editableUser?.role || "viewer");
+  const activeChecked = editableUser ? editableUser.active !== false : true;
+  const members = getProjectMembers(project.id);
+  const summary = getProjectMembershipSummary(project.id);
+  const submitLabel = usersState.saving
+    ? "Guardando..."
+    : editableUser
+      ? "Guardar miembro"
+      : "Anadir miembro";
+
+  const memberRows = members
+    .map((entry) => {
+      const rowEmail = String(entry.email || "").trim().toLowerCase();
+      const isEditing = rowEmail === String(usersState.editingEmail || "").trim().toLowerCase();
+      const entryRole = normalizeUserRole(entry.role);
+      const projectScopeLabel = resolveUserProjectScopeLabel(entry, projectNameMap);
+      const activeLabel = entry.active !== false ? "Activo" : "Inactivo";
+      const activeClass = entry.active !== false ? "is-active" : "is-inactive";
+      const scopeLabel = entryRole === "superadmin" ? "Acceso total" : "Miembro directo";
+      const canRemove = entryRole !== "superadmin" && userHasDirectProjectAccess(entry, project.id);
+
+      return `
+        <tr class="${isEditing ? "is-selected" : ""}">
+          <td>
+            <div class="users-member-cell">
+              <span class="users-member-avatar">${escapeHtml(getUserInitials(entry))}</span>
+              <span>
+                <strong>${escapeHtml(getUsersDisplayName(entry))}</strong>
+                <small>${escapeHtml(entry.email || "")}</small>
+              </span>
+            </div>
+          </td>
+          <td><span class="users-role-pill">${escapeHtml(getUserRoleLabel(entryRole))}</span></td>
+          <td><span class="users-status users-status--${activeClass}">${activeLabel}</span></td>
+          <td class="users-project-scope-cell" title="${escapeHtml(projectScopeLabel)}">${escapeHtml(scopeLabel)}</td>
+          <td>${escapeHtml(formatUsersDate(entry.updatedAt || entry.createdAt))}</td>
+          <td>
+            <div class="users-row-actions">
+              ${
+                canRemove
+                  ? `
+                    <button
+                      type="button"
+                      class="topbar-button"
+                      data-users-action="edit"
+                      data-user-email="${escapeHtml(entry.email || "")}"
+                    >
+                      Editar
+                    </button>
+                    <button
+                      type="button"
+                      class="topbar-button topbar-button--danger"
+                      data-users-action="remove-project-member"
+                      data-user-email="${escapeHtml(entry.email || "")}"
+                      ${usersState.saving ? "disabled" : ""}
+                    >
+                      Quitar
+                    </button>
+                  `
+                  : `<span class="users-action-muted">Acceso total</span>`
+              }
+            </div>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  usersPanel.innerHTML = `
+    <div class="users-admin-view users-admin-view--members">
+      <div class="users-page-header">
+        <div>
+          <div class="users-breadcrumb">
+            <button type="button" data-users-action="back-projects">Proyectos</button>
+            <span>/</span>
+            <strong>${escapeHtml(project.name)}</strong>
+          </div>
+          <h2>Miembros del proyecto</h2>
+          <p>Administra quienes pueden ver o editar este proyecto dentro de Quantiva.</p>
+        </div>
+        <button type="button" class="topbar-button" data-users-action="refresh" ${usersState.loading ? "disabled" : ""}>
+          Actualizar
+        </button>
+      </div>
+
+      ${feedback}
+
+      <div class="users-toolbar">
+        <button type="button" class="topbar-button topbar-button--primary" data-users-action="new-member">
+          Anadir miembro
+        </button>
+        <div class="users-toolbar-summary">
+          <strong>${summary.active}</strong>
+          <span>miembros activos</span>
+        </div>
+        <div class="users-toolbar-summary">
+          <strong>${summary.direct}</strong>
+          <span>asignados directo</span>
+        </div>
+      </div>
+
+      <div class="users-members-layout">
+        <section class="users-card users-member-form-card">
+          <div class="users-card-head">
+            <strong>${editableUser ? "Editar miembro" : "Anadir miembro"}</strong>
+            ${editableUser ? `<button type="button" class="topbar-button" data-users-action="new-member">Nuevo</button>` : ""}
+          </div>
+          <form class="users-form" data-users-project-member-form autocomplete="off">
+            <input type="hidden" name="projectId" value="${escapeHtml(project.id)}" />
+
+            <label for="users-display-name-input">Nombre</label>
+            <input
+              id="users-display-name-input"
+              name="displayName"
+              type="text"
+              required
+              maxlength="120"
+              value="${escapeHtml(displayName)}"
+              placeholder="Nombre visible"
+            />
+
+            <label for="users-email-input">Correo</label>
+            <input
+              id="users-email-input"
+              name="email"
+              type="email"
+              required
+              maxlength="320"
+              value="${escapeHtml(email)}"
+              placeholder="usuario@dominio.com"
+              ${editableUser ? 'readonly aria-readonly="true"' : ""}
+            />
+
+            <label for="users-role-select">Rol</label>
+            <select id="users-role-select" name="role">
+              ${USER_ROLE_OPTIONS
+                .map((option) => {
+                  const selected = option === role ? " selected" : "";
+                  return `<option value="${option}"${selected}>${escapeHtml(getUserRoleLabel(option))}</option>`;
+                })
+                .join("")}
+            </select>
+
+            <p class="users-field-help">
+              Viewer solo lee, Editor guarda cambios, Admin gestiona datos del proyecto y Superadmin obtiene acceso total.
+            </p>
+
+            <label class="users-checkbox-row">
+              <input type="checkbox" name="active" ${activeChecked ? "checked" : ""} />
+              Usuario activo
+            </label>
+
+            <div class="users-form-actions">
+              <button
+                type="submit"
+                class="topbar-button topbar-button--primary"
+                ${usersState.saving ? "disabled" : ""}
+              >
+                ${submitLabel}
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section class="users-card users-member-list-card">
+          <div class="users-card-head">
+            <strong>${escapeHtml(project.name)}</strong>
+            <span class="users-count-pill">${members.length}</span>
+          </div>
+          ${
+            usersState.loading && !usersState.loaded
               ? `
                 <div class="empty-state">
-                  <strong>No hay usuarios creados</strong>
-                  <p>Completa el formulario para agregar el primero.</p>
+                  <strong>Cargando miembros...</strong>
+                  <p>Sincronizando la lista desde MySQL.</p>
                 </div>
               `
-              : `
-                <div class="users-table-wrap">
-                  <table class="users-table">
-                    <thead>
-                      <tr>
-                        <th>Nombre</th>
-                        <th>Correo</th>
-                        <th>Rol</th>
-                        <th>Proyectos</th>
-                        <th>Estado</th>
-                        <th>Actualizado</th>
-                        <th>Accion</th>
-                      </tr>
-                    </thead>
-                    <tbody>${rows}</tbody>
-                  </table>
-                </div>
-              `
-        }
-      </section>
+              : members.length === 0
+                ? `
+                  <div class="empty-state">
+                    <strong>Sin miembros directos</strong>
+                    <p>Anade el primer miembro para habilitar acceso a este proyecto.</p>
+                  </div>
+                `
+                : `
+                  <div class="users-table-wrap">
+                    <table class="users-table users-members-table">
+                      <thead>
+                        <tr>
+                          <th>Nombre</th>
+                          <th>Rol</th>
+                          <th>Estado</th>
+                          <th>Alcance</th>
+                          <th>Actualizado</th>
+                          <th>Accion</th>
+                        </tr>
+                      </thead>
+                      <tbody>${memberRows}</tbody>
+                    </table>
+                  </div>
+                `
+          }
+        </section>
+      </div>
     </div>
   `;
 }
@@ -2174,6 +2441,13 @@ async function loadUsersForPanel({ force = false } = {}) {
     usersState.projects = normalizeUsersProjectOptions(payload?.projects);
     usersState.loadedForToken = authState.token;
     usersState.loaded = true;
+
+    if (
+      usersState.selectedProjectId
+      && !usersState.projects.some((project) => project.id === usersState.selectedProjectId)
+    ) {
+      usersState.selectedProjectId = "";
+    }
 
     if (usersState.editingEmail) {
       const stillExists = usersState.items.some((entry) => entry.email === usersState.editingEmail);
@@ -2269,6 +2543,184 @@ async function handleUsersFormSubmit(formElement) {
       error instanceof Error
         ? error.message
         : "No se pudo guardar el usuario.";
+  } finally {
+    usersState.saving = false;
+    if (state.currentView === "usuarios") {
+      renderUsersPanel();
+    }
+  }
+}
+
+async function handleProjectMemberFormSubmit(formElement) {
+  if (!isUsersViewAllowed() || usersState.saving) {
+    return;
+  }
+
+  const formData = new FormData(formElement);
+  const projectId = String(formData.get("projectId") || usersState.selectedProjectId || "").trim();
+  const selectedProject = usersState.projects.find((project) => project.id === projectId);
+  const email = String(formData.get("email") || "").trim().toLowerCase();
+  const displayName = String(formData.get("displayName") || "").trim();
+  const requestedRole = normalizeUserRole(formData.get("role"));
+  const active = formData.get("active") === "on";
+  const existingUser = usersState.items.find((entry) => entry.email === email) || null;
+  const existingRole = normalizeUserRole(existingUser?.role);
+  const wasEditing = Boolean(usersState.editingEmail);
+
+  if (!selectedProject) {
+    usersState.error = "Selecciona un proyecto valido para asignar el miembro.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  if (!email || !displayName) {
+    usersState.error = "Debes completar nombre y correo.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  if (existingRole === "superadmin" && requestedRole !== "superadmin") {
+    usersState.error = "Este usuario ya es superadmin y tiene acceso total. Cambia su rol desde un flujo global antes de limitarlo.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const projectIds = requestedRole === "superadmin"
+    ? ["*"]
+    : normalizeUsersProjectIds([
+      ...normalizeUsersProjectIds(existingUser?.projectIds, { allowWildcard: false }),
+      selectedProject.id,
+    ], { allowWildcard: false });
+
+  if (requestedRole !== "superadmin" && active && projectIds.length === 0) {
+    usersState.error = "Debes asignar al menos un proyecto al usuario activo.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  usersState.saving = true;
+  usersState.error = "";
+  usersState.info = "";
+  renderUsersPanel();
+
+  try {
+    const response = await window.fetch(AUTH_USERS_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...getAuthHeaders(),
+      },
+      body: JSON.stringify({
+        email,
+        displayName,
+        role: requestedRole,
+        projectIds,
+        active,
+      }),
+    });
+
+    if (response.status === 401) {
+      handleUnauthorizedAccess("Tu sesion vencio. Vuelve a iniciar sesion.");
+      return;
+    }
+
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result?.ok) {
+      throw new Error(result?.error || `Error ${response.status}`);
+    }
+
+    usersState.editingEmail = "";
+    usersState.info = wasEditing
+      ? "Miembro actualizado correctamente."
+      : `Miembro agregado a ${selectedProject.name}.`;
+
+    await loadUsersForPanel({ force: true });
+  } catch (error) {
+    usersState.error =
+      error instanceof Error
+        ? error.message
+        : "No se pudo guardar el miembro.";
+  } finally {
+    usersState.saving = false;
+    if (state.currentView === "usuarios") {
+      renderUsersPanel();
+    }
+  }
+}
+
+async function removeUserFromSelectedProject(emailInput) {
+  if (!isUsersViewAllowed() || usersState.saving) {
+    return;
+  }
+
+  const selectedProject = getUsersSelectedProject();
+  const email = String(emailInput || "").trim().toLowerCase();
+  const user = usersState.items.find((entry) => entry.email === email) || null;
+
+  if (!selectedProject || !user) {
+    usersState.error = "No se encontro el miembro seleccionado.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const role = normalizeUserRole(user.role);
+  const currentProjectIds = getUsersProjectIdsForEntry(user, { allowWildcard: true });
+  if (role === "superadmin" || currentProjectIds.includes("*")) {
+    usersState.error = "No puedes quitar un superadmin desde un proyecto porque tiene acceso total.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const nextProjectIds = currentProjectIds.filter((projectId) => projectId !== selectedProject.id);
+  const nextActive = nextProjectIds.length > 0 && user.active !== false;
+
+  usersState.saving = true;
+  usersState.error = "";
+  usersState.info = "";
+  renderUsersPanel();
+
+  try {
+    const response = await window.fetch(AUTH_USERS_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...getAuthHeaders(),
+      },
+      body: JSON.stringify({
+        email: user.email,
+        displayName: getUsersDisplayName(user),
+        role,
+        projectIds: nextProjectIds,
+        active: nextActive,
+      }),
+    });
+
+    if (response.status === 401) {
+      handleUnauthorizedAccess("Tu sesion vencio. Vuelve a iniciar sesion.");
+      return;
+    }
+
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result?.ok) {
+      throw new Error(result?.error || `Error ${response.status}`);
+    }
+
+    usersState.editingEmail = "";
+    usersState.info = `${user.email} fue quitado de ${selectedProject.name}.`;
+    await loadUsersForPanel({ force: true });
+  } catch (error) {
+    usersState.error =
+      error instanceof Error
+        ? error.message
+        : "No se pudo quitar el miembro del proyecto.";
   } finally {
     usersState.saving = false;
     if (state.currentView === "usuarios") {
@@ -3059,7 +3511,7 @@ function refreshMetrics(
   }
 
   if (viewConfig.contentType === "users") {
-    filterStatus.textContent = "Gestionando usuarios del sistema";
+    filterStatus.textContent = "Gestionando usuarios por proyecto";
     return;
   }
 

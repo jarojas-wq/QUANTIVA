@@ -1593,6 +1593,220 @@ select {
   text-overflow: ellipsis;
 }
 
+.users-admin-view {
+  display: grid;
+  gap: 14px;
+  min-height: 100%;
+}
+
+.users-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+
+.users-page-header > div {
+  display: grid;
+  gap: 5px;
+}
+
+.users-page-header h2 {
+  margin: 0;
+  font-family: "Bahnschrift", "Segoe UI", sans-serif;
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.users-page-header p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.users-kicker {
+  color: var(--label-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.users-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.users-breadcrumb button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+
+.users-breadcrumb button:hover {
+  text-decoration: underline;
+}
+
+.users-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  background: var(--surface-alt);
+  padding: 8px;
+}
+
+.users-toolbar-summary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  padding: 6px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.users-toolbar-summary strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.users-project-table-wrap,
+.users-table-wrap {
+  border-radius: 8px;
+}
+
+.users-project-table {
+  min-width: 920px;
+}
+
+.users-project-table tbody tr,
+.users-project-row {
+  cursor: pointer;
+}
+
+.users-project-table tbody tr:hover {
+  background: var(--table-row-hover);
+}
+
+.users-project-name-cell,
+.users-member-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.users-project-icon,
+.users-member-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(32, 113, 79, 0.28);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 800;
+}
+
+.users-member-avatar {
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.users-project-name-copy,
+.users-member-cell span:last-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.users-project-name-copy strong,
+.users-member-cell strong {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.users-project-name-copy small,
+.users-member-cell small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.users-project-type-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid var(--line);
+  background: var(--surface-alt);
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.users-project-access-copy {
+  display: grid;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.users-project-access-copy strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.users-members-layout {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(280px, 340px) minmax(520px, 1fr);
+  align-items: start;
+}
+
+.users-member-form-card,
+.users-member-list-card,
+.users-card {
+  border-radius: 8px;
+}
+
+.users-members-table {
+  min-width: 820px;
+}
+
+.users-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.users-action-muted {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .audit-panel-head {
   display: flex;
   align-items: flex-start;
@@ -2519,6 +2733,10 @@ textarea.cell-field {
   .users-panel-grid {
     grid-template-columns: 1fr;
   }
+
+  .users-members-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 900px) {
@@ -2619,6 +2837,15 @@ textarea.cell-field {
 
   .users-table {
     min-width: 700px;
+  }
+
+  .users-page-header {
+    flex-direction: column;
+  }
+
+  .users-page-header .topbar-button,
+  .users-toolbar .topbar-button {
+    width: 100%;
   }
 }
 
