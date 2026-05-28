@@ -1,6 +1,7 @@
-data/
+.git
+.gitignore
 .env
-*.credentials.json
+data/
 node_modules/
 *.log
 dist/

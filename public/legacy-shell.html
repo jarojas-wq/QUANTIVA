@@ -1,0 +1,318 @@
+<div class="app-layout" id="app-layout">
+      <aside class="sidebar" aria-label="Panel lateral">
+        <div class="sidebar-header">
+          <button
+            id="sidebar-toggle-button"
+            class="icon-button"
+            type="button"
+            aria-label="Ocultar o mostrar panel lateral"
+            title="Ocultar o mostrar panel lateral"
+          >
+            |||
+          </button>
+
+          <div class="brand-wrap">
+            <div class="brand-mark">IC</div>
+            <div class="brand-block">
+              <strong class="brand-title">Itemizados</strong>
+              <span class="brand-caption">Sistema local de costos</span>
+            </div>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Secciones">
+          <button type="button" class="nav-item nav-item--active" data-view="itemizado">
+            Resumen
+          </button>
+          <button type="button" class="nav-item" data-view="presupuesto">
+            Presupuestos
+          </button>
+          <button type="button" class="nav-item" data-view="control-bim">
+            Control BIM
+          </button>
+          <button type="button" class="nav-item" data-view="auditoria">
+            AuditorÃ­a
+          </button>
+          <button type="button" class="nav-item" data-view="usuarios" hidden>
+            Usuarios
+          </button>
+          <button type="button" class="nav-item" data-view="exportaciones-rvt">
+            Exportaciones para RVT
+          </button>
+          <button type="button" class="nav-item" data-view="exportacion-presupuesto">
+            ExportaciÃ³n Presupuesto
+          </button>
+        </nav>
+
+        <div class="sidebar-body">
+          <section class="sidebar-section">
+            <p class="section-kicker">Atajo</p>
+            <div class="sidebar-card sidebar-card--compact">
+              <p id="sidebar-shortcut-text" class="sidebar-copy">
+                Selecciona una fila y usa la franja superior para crear,
+                ordenar o indentar sin quitar foco a la matriz.
+              </p>
+            </div>
+          </section>
+
+          <section class="sidebar-section sidebar-section--project">
+            <p class="section-kicker">Proyecto</p>
+            <div class="sidebar-card sidebar-project-card">
+              <strong class="sidebar-card-title">Cambiar proyecto</strong>
+              <select
+                id="project-select"
+                class="project-select project-select--sidebar"
+                aria-label="Proyecto activo"
+              ></select>
+              <div class="sidebar-project-actions">
+                <button id="new-project-button" type="button" class="topbar-button topbar-button--primary">
+                  Nuevo
+                </button>
+                <button id="rename-project-button" type="button" class="topbar-button">
+                  Renombrar
+                </button>
+                <button id="delete-project-button" type="button" class="topbar-button topbar-button--danger">
+                  Eliminar
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="sidebar-footer">
+          <span class="save-dot" aria-hidden="true"></span>
+          <p id="save-status" class="save-status">MySQL activo</p>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div class="topbar-copy">
+            <strong>Itemizado y costos</strong>
+            <span id="app-mode-label">Aplicativo web local</span>
+          </div>
+
+          <div class="operator-wrap" hidden>
+            <label class="project-switcher-label" for="operator-name-input">Responsable</label>
+            <input
+              id="operator-name-input"
+              class="operator-input"
+              type="text"
+              placeholder="Usuario local"
+              aria-label="Responsable de cambios"
+            />
+          </div>
+
+          <div id="search-wrap" class="search-wrap" hidden>
+            <input
+              id="table-search-input"
+              type="text"
+              placeholder="Buscar por codigo, codificacion o descripcion"
+            />
+          </div>
+
+          <div class="topbar-actions">
+            <button id="save-snapshot-button" type="button" class="topbar-button" hidden>
+              Guardar foto
+            </button>
+            <button
+              id="sync-now-button"
+              type="button"
+              class="topbar-button sync-now-button"
+              aria-label="Sincronizar"
+              title="Sincronizar"
+            >
+              <svg class="sync-now-icon" viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                <path d="M21 2v6h-6"></path>
+                <path d="M3 22v-6h6"></path>
+                <path d="M20.49 9A9 9 0 0 0 5.64 5.64L3 8"></path>
+                <path d="M3.51 15A9 9 0 0 0 18.36 18.36L21 16"></path>
+              </svg>
+              <span class="sr-only">Sincronizar</span>
+            </button>
+            <button
+              id="theme-toggle-button"
+              type="button"
+              class="topbar-button theme-toggle-button"
+              aria-label="Activar modo oscuro"
+              title="Activar modo oscuro"
+              aria-pressed="false"
+            >
+              <span class="theme-toggle-icon theme-toggle-icon--moon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M21 14.5A8.5 8.5 0 1 1 9.5 3 7 7 0 0 0 21 14.5z"></path>
+                </svg>
+              </span>
+              <span class="theme-toggle-icon theme-toggle-icon--sun" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <circle cx="12" cy="12" r="4"></circle>
+                  <path d="M12 2v2"></path>
+                  <path d="M12 20v2"></path>
+                  <path d="M4.93 4.93l1.41 1.41"></path>
+                  <path d="M17.66 17.66l1.41 1.41"></path>
+                  <path d="M2 12h2"></path>
+                  <path d="M20 12h2"></path>
+                  <path d="M4.93 19.07l1.41-1.41"></path>
+                  <path d="M17.66 6.34l1.41-1.41"></path>
+                </svg>
+              </span>
+            </button>
+            <div id="account-menu" class="account-menu" hidden>
+              <button
+                id="account-menu-button"
+                type="button"
+                class="account-menu-button"
+                aria-label="Abrir menu de cuenta"
+                title="Cuenta"
+                aria-haspopup="menu"
+                aria-expanded="false"
+              >
+                <img id="account-menu-avatar-image" class="account-menu-avatar-image" alt="" hidden />
+                <span id="account-menu-avatar-text" class="account-menu-avatar-text" aria-hidden="true">U</span>
+              </button>
+              <div id="account-menu-panel" class="account-menu-panel" hidden>
+                <div class="account-menu-head">
+                  <div class="account-menu-avatar" aria-hidden="true">
+                    <img id="account-menu-panel-avatar-image" class="account-menu-avatar-image" alt="" hidden />
+                    <span id="account-menu-panel-avatar-text">U</span>
+                  </div>
+                  <div class="account-menu-copy">
+                    <strong id="account-menu-name">Usuario</strong>
+                    <span id="account-menu-meta">usuario@correo.com (USER)</span>
+                  </div>
+                </div>
+                <button id="logout-button" type="button" class="topbar-button account-menu-logout">
+                  Cerrar sesion
+                </button>
+              </div>
+            </div>
+            <span class="status-pill" hidden>Sincronizacion manual</span>
+            <span id="storage-mode-pill" class="status-pill status-pill--soft" hidden>Modo local</span>
+          </div>
+        </header>
+
+        <main class="workspace-main">
+          <section class="workspace-head">
+            <div class="workspace-title">
+              <p class="view-label">Proyecto activo</p>
+              <h1 id="project-title">Presupuesto estructurado</h1>
+            </div>
+
+            <div class="workspace-pills">
+              <span class="head-pill">
+                <span class="head-pill-label">Partidas</span>
+                <strong id="item-count">0</strong>
+              </span>
+              <span class="head-pill">
+                <span class="head-pill-label">Raices</span>
+                <strong id="root-count">0</strong>
+              </span>
+              <span class="head-pill">
+                <span class="head-pill-label">Niveles</span>
+                <strong id="depth-count">0</strong>
+              </span>
+              <span class="head-pill">
+                <span class="head-pill-label">Total</span>
+                <strong id="grand-total">0.00</strong>
+              </span>
+              <span class="head-pill head-pill--selection">
+                <span class="head-pill-label">Seleccion</span>
+                <strong id="selected-code">Ninguna</strong>
+              </span>
+            </div>
+          </section>
+
+          <section id="controls-panel" class="panel panel--controls">
+            <div class="toolbar-row">
+              <div id="structure-toolbar" class="toolbar" role="toolbar" aria-label="Acciones del itemizado">
+                <button
+                  type="button"
+                  class="toolbar-button toolbar-button--primary"
+                  data-toolbar-action="add-root"
+                >
+                  Nueva raiz
+                </button>
+                <button type="button" class="toolbar-button" data-toolbar-action="add-below">
+                  Nueva debajo
+                </button>
+                <button type="button" class="toolbar-button" data-toolbar-action="add-child">
+                  Nueva hija
+                </button>
+                <button type="button" class="toolbar-button" data-toolbar-action="move-up">
+                  Subir
+                </button>
+                <button type="button" class="toolbar-button" data-toolbar-action="move-down">
+                  Bajar
+                </button>
+                <button type="button" class="toolbar-button" data-toolbar-action="indent">
+                  Indentar
+                </button>
+                <button type="button" class="toolbar-button" data-toolbar-action="outdent">
+                  Desindentar
+                </button>
+                <button
+                  type="button"
+                  class="toolbar-button toolbar-button--danger"
+                  data-toolbar-action="delete"
+                >
+                  Eliminar
+                </button>
+              </div>
+
+              <div class="controls-meta">
+                <span class="table-meta-pill">
+                  <strong id="visible-count">0</strong> visibles
+                </span>
+                <span class="table-meta-pill">
+                  <strong id="visible-count-inline">0</strong> en tabla
+                </span>
+                <span class="table-meta-pill" id="filter-status">
+                  Mostrando todas las filas
+                </span>
+              </div>
+            </div>
+
+            <p id="helper-text" class="helper-text">
+              Usa <strong>Nueva hija</strong> para crear subpartidas y el
+              buscador superior para filtrar rapidamente la matriz.
+            </p>
+          </section>
+
+          <section class="panel panel--table">
+            <div class="table-panel-head table-panel-head--compact">
+              <div>
+                <h2 id="matrix-title">Matriz de partidas</h2>
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table id="item-table" class="item-table">
+                <colgroup id="item-colgroup"></colgroup>
+                <thead id="item-head"></thead>
+                <tbody id="item-body"></tbody>
+              </table>
+            </div>
+
+            <div id="export-panel" class="export-panel" hidden></div>
+            <div id="bim-panel" class="bim-panel" hidden></div>
+            <div id="audit-panel" class="audit-panel" hidden></div>
+            <div id="users-panel" class="users-panel" hidden></div>
+            <div id="snapshot-panel" class="snapshot-panel" hidden></div>
+          </section>
+        </main>
+      </section>
+    </div>
+
+    <div id="access-gate" class="access-gate" hidden>
+      <div class="access-gate-card">
+        <h2>Control de acceso</h2>
+        <p>Inicia sesion con Google para usar Itemicostos.</p>
+        <div id="google-login-wrap" class="google-login-wrap">
+          <div id="google-signin-button"></div>
+          <p class="google-login-note">Solo ingresan correos autorizados por el superadmin.</p>
+        </div>
+        <p id="access-status" class="access-status" hidden></p>
+        <p id="access-divider" class="access-divider" hidden></p>
+        <p id="access-error" class="access-error" hidden></p>
+      </div>
+    </div>

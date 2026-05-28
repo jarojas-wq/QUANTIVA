@@ -2,10 +2,8 @@ import http from "node:http";
 import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
-import { google } from "googleapis";
 import mysql from "mysql2/promise";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,15 +12,24 @@ loadLocalEnv(path.join(__dirname, ".env"));
 const host = process.env.HOST || "127.0.0.1";
 const port = Number.parseInt(process.env.PORT || "5500", 10);
 const dataDir = path.join(__dirname, "data");
-const dbPath = path.join(dataDir, "itemicostos.sqlite");
-const googleSheetsConfigPath = path.join(dataDir, "google-sheets.json");
-const googleSheetsScopes = ["https://www.googleapis.com/auth/spreadsheets"];
+const distDir = path.join(__dirname, "dist");
+const accessControlPath = path.join(dataDir, "access-control.json");
 const mysqlSchemaPath = path.join(__dirname, "sql", "mysql", "001_mtrd_itemicostos_real.sql");
 const revitIngestApiKey = String(process.env.REVIT_INGEST_API_KEY || "").trim();
+const webSessionCookieName = String(process.env.ACCESS_COOKIE_NAME || "mtr2_session").trim() || "mtr2_session";
 
 fs.mkdirSync(dataDir, { recursive: true });
 
 let storage = null;
+const accessControl = createAccessControlManager(accessControlPath, {
+  getExternalStore: () => (
+    storage
+    && typeof storage.loadAccessUsers === "function"
+    && typeof storage.persistAccessUsers === "function"
+      ? storage
+      : null
+  ),
+});
 
 const server = http.createServer(async (request, response) => {
   try {
@@ -30,15 +37,218 @@ const server = http.createServer(async (request, response) => {
 
     if (url.pathname === "/api/health") {
       const health = await storage.getHealth();
-      respondJson(response, health.ok ? 200 : 500, health);
+      respondJson(response, health.ok ? 200 : 500, {
+        ...health,
+        accessControl: accessControl.getPublicSettings(),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/access/settings") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      respondJson(response, 200, {
+        ok: true,
+        accessControl: accessControl.getPublicSettings(),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/auth/web/config") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      respondJson(response, 200, buildWebAuthSession(null, accessControl.getPublicSettings()));
+      return;
+    }
+
+    if (url.pathname === "/api/auth/web/session") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const session = await accessControl.authorizeRequest(request, "viewer", { silent: true });
+      respondJson(response, 200, buildWebAuthSession(session?.ok ? session.user : null, accessControl.getPublicSettings()));
+      return;
+    }
+
+    if (url.pathname === "/api/auth/web/google/login") {
+      if (request.method !== "POST") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+
+      const payload = await readJsonBody(request);
+      const result = await accessControl.loginWithGoogle(payload?.credential || payload?.idToken);
+      if (!result.ok) {
+        respondJson(response, result.status, { ok: false, error: result.error });
+        return;
+      }
+
+      writeSessionCookie(response, result.token, result.expiresAt);
+      respondJson(response, 200, {
+        auth: buildWebAuthSession(result.user, accessControl.getPublicSettings(), result.expiresAt),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/auth/web/logout") {
+      if (request.method !== "POST") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+
+      const token = readRequestSessionToken(request);
+      if (token) {
+        await accessControl.logoutByToken(token);
+      }
+      clearSessionCookie(response);
+      respondJson(response, 200, {
+        auth: buildWebAuthSession(null, accessControl.getPublicSettings()),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/auth/login") {
+      if (request.method !== "POST") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      respondJson(response, 409, {
+        ok: false,
+        error: "Login con correo/clave deshabilitado. Usa Google.",
+        accessControl: accessControl.getPublicSettings(),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/auth/google") {
+      if (request.method !== "POST") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+
+      const payload = await readJsonBody(request);
+      const result = await accessControl.loginWithGoogle(payload?.idToken || payload?.credential);
+      if (!result.ok) {
+        respondJson(response, result.status, { ok: false, error: result.error });
+        return;
+      }
+
+      writeSessionCookie(response, result.token, result.expiresAt);
+      respondJson(response, 200, {
+        ok: true,
+        token: result.token,
+        user: result.user,
+        accessControl: accessControl.getPublicSettings(),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/auth/me") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+
+      const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+      if (!session) {
+        return;
+      }
+
+      respondJson(response, 200, {
+        ok: true,
+        user: session.user,
+        accessControl: accessControl.getPublicSettings(),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/auth/logout") {
+      if (request.method !== "POST") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+
+      const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+      if (!session) {
+        return;
+      }
+
+      await accessControl.logoutByToken(session.token);
+      clearSessionCookie(response);
+      respondJson(response, 200, { ok: true });
+      return;
+    }
+
+    if (url.pathname === "/api/auth/users") {
+      if (request.method === "GET") {
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "superadmin");
+        if (!session) {
+          return;
+        }
+
+        const statePayload = await storage.loadState();
+
+        respondJson(response, 200, {
+          ok: true,
+          users: await accessControl.listUsers(),
+          projects: buildProjectAccessOptions(statePayload?.projects),
+        });
+        return;
+      }
+
+      if (request.method === "POST") {
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "superadmin");
+        if (!session) {
+          return;
+        }
+
+        const payload = await readJsonBody(request);
+        const statePayload = await storage.loadState();
+        const result = await accessControl.upsertUser(payload, session.user, {
+          availableProjectIds: buildProjectAccessOptions(statePayload?.projects).map(
+            (project) => project.id,
+          ),
+        });
+        if (!result.ok) {
+          respondJson(response, result.status, { ok: false, error: result.error });
+          return;
+        }
+
+        respondJson(response, 200, {
+          ok: true,
+          user: result.user,
+        });
+        return;
+      }
+
+      respondJson(response, 405, { error: "Metodo no permitido." });
       return;
     }
 
     if (url.pathname === "/api/state") {
       if (request.method === "GET") {
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+        if (!session) {
+          return;
+        }
+
         const payload = await storage.loadState();
+        const scopedPayload = filterStateByUserProjects(payload, session.user);
+        if (scopedPayload.projects.length === 0 && !userCanAccessAllProjects(session.user)) {
+          respondJson(response, 403, {
+            ok: false,
+            error: "No tienes proyectos asignados. Solicita acceso al superadmin.",
+          });
+          return;
+        }
+
         respondJson(response, 200, {
-          ...payload,
+          ...scopedPayload,
           storage: storage.kind,
           storageLabel: storage.label,
         });
@@ -46,14 +256,29 @@ const server = http.createServer(async (request, response) => {
       }
 
       if (request.method === "PUT") {
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "editor");
+        if (!session) {
+          return;
+        }
+
         const payload = await readJsonBody(request);
         const normalized = normalizeIncomingState(payload);
-        const result = await storage.persistState(normalized);
+        const currentState = await storage.loadState();
+        const scopedWrite = mergeStateByUserProjects(currentState, normalized, session.user);
+        if (!scopedWrite.ok) {
+          respondJson(response, scopedWrite.status, {
+            ok: false,
+            error: scopedWrite.error,
+          });
+          return;
+        }
+
+        const result = await storage.persistState(scopedWrite.state);
         respondJson(response, 200, {
           ok: true,
           savedAt: result.savedAt,
-          currentProjectId: normalized.currentProjectId,
-          projects: normalized.projects.length,
+          currentProjectId: scopedWrite.state.currentProjectId,
+          projects: scopedWrite.state.projects.length,
           storage: storage.kind,
           storageLabel: storage.label,
           spreadsheetId: result.spreadsheetId || null,
@@ -63,6 +288,70 @@ const server = http.createServer(async (request, response) => {
       }
 
       respondJson(response, 405, { error: "Metodo no permitido." });
+      return;
+    }
+
+    if (url.pathname === "/api/revit/import-state") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+
+      const authorizedByApiKey = isAuthorizedRevitIngestRequest(request);
+      let session = null;
+      if (!authorizedByApiKey) {
+        session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+        if (!session) {
+          return;
+        }
+      }
+
+      if (typeof storage.loadRevitImportState !== "function") {
+        const payload = await storage.loadState();
+        const scopedPayload = authorizedByApiKey ? payload : filterStateByUserProjects(payload, session.user);
+        const compact = buildRevitImportStateFromState(scopedPayload, url.searchParams);
+        if (!compact.project) {
+          respondJson(response, 404, {
+            ok: false,
+            error: "No se encontro un proyecto activo para Revit.",
+          });
+          return;
+        }
+
+        respondJson(response, 200, {
+          ok: true,
+          ...compact,
+          storage: storage.kind,
+          storageLabel: storage.label,
+        });
+        return;
+      }
+
+      const compact = await storage.loadRevitImportState(
+        url.searchParams.get("projectId") || url.searchParams.get("projectUid") || "",
+      );
+      if (!compact.project) {
+        respondJson(response, 404, {
+          ok: false,
+          error: "No se encontro un proyecto activo para Revit.",
+        });
+        return;
+      }
+
+      if (!authorizedByApiKey && !userCanAccessProject(session.user, compact.project.id)) {
+        respondJson(response, 403, {
+          ok: false,
+          error: "No tienes acceso al proyecto activo de ITEMICOSTOS.",
+        });
+        return;
+      }
+
+      respondJson(response, 200, {
+        ok: true,
+        ...compact,
+        storage: storage.kind,
+        storageLabel: storage.label,
+      });
       return;
     }
 
@@ -79,19 +368,26 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      if (revitIngestApiKey) {
-        const providedApiKey = readIncomingApiKey(request);
-        if (providedApiKey !== revitIngestApiKey) {
-          respondJson(response, 401, { error: "API key invalida para exportacion Revit." });
-          return;
-        }
-      }
+      const authorizedByApiKey = isAuthorizedRevitIngestRequest(request);
 
       const payload = await readJsonBody(request);
       const normalized = normalizeIncomingRevitExport(payload);
       if (!normalized.projectId) {
         respondJson(response, 400, { error: "projectId es obligatorio para importar metrado Revit." });
         return;
+      }
+      if (!authorizedByApiKey) {
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "editor");
+        if (!session) {
+          return;
+        }
+        if (!userCanAccessProject(session.user, normalized.projectId)) {
+          respondJson(response, 403, {
+            ok: false,
+            error: "No tienes acceso al proyecto solicitado.",
+          });
+          return;
+        }
       }
       if (normalized.rows.length === 0) {
         respondJson(response, 400, { error: "rows o items debe contener al menos un metrado." });
@@ -128,18 +424,11 @@ server.listen(port, host, async () => {
   const health = await storage.getHealth();
   console.log(`Itemicostos listo en http://${host}:${port}`);
   console.log(`Storage: ${storage.label}`);
-
-  if (health.storage === "google-sheets" && health.spreadsheetUrl) {
-    console.log(`Google Sheets: ${health.spreadsheetUrl}`);
-  }
-
-  if (health.storage === "google-apps-script" && health.spreadsheetUrl) {
-    console.log(`Google Sheets (Apps Script): ${health.spreadsheetUrl}`);
-  }
-
-  if (health.storage === "sqlite" && health.databasePath) {
-    console.log(`SQLite local: ${health.databasePath}`);
-  }
+  console.log(
+    accessControl.isEnabled()
+      ? `Access control: habilitado (superadmin: ${accessControl.getSuperAdminEmail()})`
+      : "Access control: deshabilitado",
+  );
 
   if (health.storage === "mysql" && health.database) {
     console.log(`MySQL: ${health.host} / ${health.database}`);
@@ -147,57 +436,7 @@ server.listen(port, host, async () => {
 });
 
 function createStorageAdapter() {
-  const explicitStorage = String(process.env.ITEMICOSTOS_STORAGE || "").trim().toLowerCase();
-
-  if (explicitStorage === "google-apps-script" || explicitStorage === "apps-script") {
-    return new GoogleAppsScriptStorage();
-  }
-
-  if (explicitStorage === "google-sheets") {
-    return new GoogleSheetsStorage();
-  }
-
-  if (explicitStorage === "mysql" || explicitStorage === "cloud-sql") {
-    return new MySQLStorage(buildMySqlConfig());
-  }
-
-  if (explicitStorage === "sqlite") {
-    return new SQLiteStorage(dbPath);
-  }
-
-  if (shouldUseGoogleAppsScript()) {
-    return new GoogleAppsScriptStorage();
-  }
-
-  if (shouldUseGoogleSheets()) {
-    return new GoogleSheetsStorage();
-  }
-
-  if (shouldUseMySql()) {
-    return new MySQLStorage(buildMySqlConfig());
-  }
-
-  return new SQLiteStorage(dbPath);
-}
-
-function shouldUseGoogleAppsScript() {
-  return Boolean(
-    process.env.GOOGLE_APPS_SCRIPT_WEBAPP_URL,
-  );
-}
-
-function shouldUseGoogleSheets() {
-  return Boolean(
-    process.env.GOOGLE_SHEETS_SPREADSHEET_ID
-    || process.env.GOOGLE_SHEETS_CREATE_IF_MISSING === "true",
-  );
-}
-
-function shouldUseMySql() {
-  return Boolean(
-    process.env.MYSQL_SOCKET_PATH
-    || (process.env.MYSQL_HOST && process.env.MYSQL_USER),
-  );
+  return new MySQLStorage(buildMySqlConfig());
 }
 
 function buildMySqlConfig() {
@@ -254,146 +493,10 @@ function loadLocalEnv(filePath) {
   }
 }
 
-class SQLiteStorage {
-  constructor(databasePath) {
-    this.kind = "sqlite";
-    this.label = "SQLite local";
-    this.databasePath = databasePath;
-    this.db = new DatabaseSync(this.databasePath);
-
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-
-      CREATE TABLE IF NOT EXISTS app_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS projects (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        rows_json TEXT NOT NULL,
-        audit_entries_json TEXT NOT NULL,
-        snapshots_json TEXT NOT NULL,
-        collapsed_ids_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-    `);
-
-    this.readProjectsStatement = this.db.prepare(`
-      SELECT
-        id,
-        name,
-        rows_json,
-        audit_entries_json,
-        snapshots_json,
-        collapsed_ids_json,
-        created_at,
-        updated_at
-      FROM projects
-      ORDER BY datetime(created_at) ASC, name ASC
-    `);
-    this.readCurrentProjectIdStatement = this.db.prepare(`
-      SELECT value
-      FROM app_meta
-      WHERE key = 'currentProjectId'
-    `);
-    this.clearProjectsStatement = this.db.prepare(`DELETE FROM projects`);
-    this.clearCurrentProjectIdStatement = this.db.prepare(`
-      DELETE FROM app_meta
-      WHERE key = 'currentProjectId'
-    `);
-    this.insertProjectStatement = this.db.prepare(`
-      INSERT INTO projects (
-        id,
-        name,
-        rows_json,
-        audit_entries_json,
-        snapshots_json,
-        collapsed_ids_json,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    this.upsertCurrentProjectIdStatement = this.db.prepare(`
-      INSERT INTO app_meta (key, value)
-      VALUES ('currentProjectId', ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `);
-  }
-
-  async getHealth() {
-    return {
-      ok: true,
-      storage: this.kind,
-      databasePath: this.databasePath,
-    };
-  }
-
-  async loadState() {
-    const projectRows = this.readProjectsStatement.all();
-    const projects = projectRows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      rows: parseJsonArray(row.rows_json),
-      auditEntries: parseJsonArray(row.audit_entries_json),
-      snapshots: parseJsonArray(row.snapshots_json),
-      collapsedIds: parseJsonArray(row.collapsed_ids_json),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-    const currentProjectRow = this.readCurrentProjectIdStatement.get();
-    const currentProjectId = projects.some((project) => project.id === currentProjectRow?.value)
-      ? currentProjectRow.value
-      : (projects[0]?.id || null);
-
-    return {
-      currentProjectId,
-      projects,
-    };
-  }
-
-  async persistState(payload) {
-    this.db.exec("BEGIN");
-
-    try {
-      this.clearProjectsStatement.run();
-      this.clearCurrentProjectIdStatement.run();
-
-      payload.projects.forEach((project) => {
-        this.insertProjectStatement.run(
-          project.id,
-          project.name,
-          JSON.stringify(project.rows),
-          JSON.stringify(project.auditEntries),
-          JSON.stringify(project.snapshots),
-          JSON.stringify(project.collapsedIds),
-          project.createdAt,
-          project.updatedAt,
-        );
-      });
-
-      if (payload.currentProjectId) {
-        this.upsertCurrentProjectIdStatement.run(payload.currentProjectId);
-      }
-
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-
-    return {
-      savedAt: new Date().toISOString(),
-    };
-  }
-}
-
 class MySQLStorage {
   constructor(config) {
     this.kind = "mysql";
-    this.label = "MySQL (Cloud SQL)";
+    this.label = "MySQL";
     this.config = config;
     this.database = sanitizeMySqlIdentifier(config.database || "MTRD");
     this.schemaPath = mysqlSchemaPath;
@@ -420,6 +523,151 @@ class MySQLStorage {
         detail: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  async loadAccessUsers() {
+    await this.ensureReady();
+    const [rows] = await this.pool.query(`
+      SELECT
+        MTRD_UsuarioAcceso_UID AS id,
+        MTRD_UsuarioAcceso_Email AS email,
+        MTRD_UsuarioAcceso_Nombre AS display_name,
+        MTRD_UsuarioAcceso_Rol AS role_name,
+        MTRD_UsuarioAcceso_Activo AS active_flag,
+        MTRD_UsuarioAcceso_ProyectoIdsJson AS project_ids_json,
+        MTRD_UsuarioAcceso_CreadoEn AS created_at,
+        MTRD_UsuarioAcceso_ActualizadoEn AS updated_at
+      FROM MTRD_UsuarioAcceso
+      ORDER BY MTRD_UsuarioAcceso_Email ASC
+    `);
+
+    return {
+      users: rows.map((row) => ({
+        id: normalizeIdentifier(row.id, randomUUID()),
+        email: String(row.email || "").trim().toLowerCase(),
+        displayName: normalizeText(row.display_name, row.email),
+        role: String(row.role_name || "viewer").trim().toLowerCase(),
+        active: Number(row.active_flag) !== 0,
+        projectIds: parseJsonArray(row.project_ids_json),
+        createdAt: normalizeIsoString(row.created_at),
+        updatedAt: normalizeIsoString(row.updated_at),
+      })),
+    };
+  }
+
+  async persistAccessUsers(payload) {
+    await this.ensureReady();
+    const users = Array.isArray(payload?.users) ? payload.users : [];
+    const connection = await this.pool.getConnection();
+
+    try {
+      await connection.beginTransaction();
+      const incomingEmails = users
+        .map((user) => String(user?.email || "").trim().toLowerCase())
+        .filter(Boolean);
+      if (incomingEmails.length > 0) {
+        await connection.query(`
+          UPDATE MTRD_UsuarioAcceso
+          SET MTRD_UsuarioAcceso_Activo = 0,
+              MTRD_UsuarioAcceso_ActualizadoEn = CURRENT_TIMESTAMP
+          WHERE MTRD_UsuarioAcceso_Email NOT IN (?)
+        `, [incomingEmails]);
+      }
+
+      for (const user of users) {
+        const email = String(user?.email || "").trim().toLowerCase();
+        if (!email) {
+          continue;
+        }
+        const role = normalizePublicRole(user.role) || "viewer";
+        const projectIds = Array.isArray(user.projectIds) ? user.projectIds : [];
+        await connection.query(`
+          INSERT INTO MTRD_UsuarioAcceso (
+            MTRD_UsuarioAcceso_UID,
+            MTRD_UsuarioAcceso_Email,
+            MTRD_UsuarioAcceso_Nombre,
+            MTRD_UsuarioAcceso_Rol,
+            MTRD_UsuarioAcceso_Activo,
+            MTRD_UsuarioAcceso_ProyectoIdsJson,
+            MTRD_UsuarioAcceso_CreadoEn,
+            MTRD_UsuarioAcceso_ActualizadoEn
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            MTRD_UsuarioAcceso_Nombre = VALUES(MTRD_UsuarioAcceso_Nombre),
+            MTRD_UsuarioAcceso_Rol = VALUES(MTRD_UsuarioAcceso_Rol),
+            MTRD_UsuarioAcceso_Activo = VALUES(MTRD_UsuarioAcceso_Activo),
+            MTRD_UsuarioAcceso_ProyectoIdsJson = VALUES(MTRD_UsuarioAcceso_ProyectoIdsJson),
+            MTRD_UsuarioAcceso_ActualizadoEn = VALUES(MTRD_UsuarioAcceso_ActualizadoEn)
+        `, [
+          normalizeIdentifier(user.id, randomUUID()),
+          email,
+          normalizeText(user.displayName, email),
+          role,
+          user.active === false ? 0 : 1,
+          JSON.stringify(role === "superadmin" ? ["*"] : projectIds),
+          toMySqlDateTime(user.createdAt),
+          toMySqlDateTime(user.updatedAt || Date.now()),
+        ]);
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async persistAccessSession(session) {
+    await this.ensureReady();
+    await this.pool.query(`
+      INSERT INTO MTRD_SesionAcceso (
+        MTRD_SesionAcceso_TokenHash,
+        MTRD_SesionAcceso_Email,
+        MTRD_SesionAcceso_ExpiraEn,
+        MTRD_SesionAcceso_ProfileImageUrl
+      ) VALUES (?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        MTRD_SesionAcceso_Email = VALUES(MTRD_SesionAcceso_Email),
+        MTRD_SesionAcceso_ExpiraEn = VALUES(MTRD_SesionAcceso_ExpiraEn),
+        MTRD_SesionAcceso_ProfileImageUrl = VALUES(MTRD_SesionAcceso_ProfileImageUrl),
+        MTRD_SesionAcceso_ActualizadoEn = CURRENT_TIMESTAMP
+    `, [
+      String(session?.tokenHash || ""),
+      String(session?.email || "").trim().toLowerCase(),
+      toMySqlDateTime(session?.expiresAt),
+      normalizeProfileImageUrlForStorage(session?.profileImageUrl || ""),
+    ]);
+  }
+
+  async loadAccessSession(tokenHash) {
+    await this.ensureReady();
+    const [rows] = await this.pool.query(`
+      SELECT
+        MTRD_SesionAcceso_Email AS email,
+        MTRD_SesionAcceso_ExpiraEn AS expires_at,
+        MTRD_SesionAcceso_ProfileImageUrl AS profile_image_url
+      FROM MTRD_SesionAcceso
+      WHERE MTRD_SesionAcceso_TokenHash = ?
+      LIMIT 1
+    `, [String(tokenHash || "")]);
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      email: row.email,
+      expiresAt: normalizeIsoString(row.expires_at),
+      profileImageUrl: row.profile_image_url || "",
+    };
+  }
+
+  async deleteAccessSession(tokenHash) {
+    await this.ensureReady();
+    await this.pool.query(`
+      DELETE FROM MTRD_SesionAcceso
+      WHERE MTRD_SesionAcceso_TokenHash = ?
+    `, [String(tokenHash || "")]);
   }
 
   async loadState() {
@@ -454,7 +702,8 @@ class MySQLStorage {
         MTRD_Item_Costo AS item_costo,
         MTRD_Item_MetradoTradicional AS item_metrado_tradicional,
         MTRD_Item_MetradoBim AS item_metrado_bim,
-        MTRD_Item_TipoMetrado AS item_tipo_metrado
+        MTRD_Item_TipoMetrado AS item_tipo_metrado,
+        MTRD_Item_ReglaMetrado AS item_regla_metrado
       FROM MTRD_Item
       WHERE MTRD_Item_KEY_Proyecto IN (?)
       ORDER BY MTRD_Item_KEY_Proyecto ASC, MTRD_Item_Orden ASC
@@ -526,38 +775,87 @@ class MySQLStorage {
           MTRD_SnapshotItem_Costo AS item_costo,
           MTRD_SnapshotItem_MetradoTradicional AS item_metrado_tradicional,
           MTRD_SnapshotItem_MetradoBim AS item_metrado_bim,
-          MTRD_SnapshotItem_TipoMetrado AS item_tipo_metrado
+          MTRD_SnapshotItem_TipoMetrado AS item_tipo_metrado,
+          MTRD_SnapshotItem_ReglaMetrado AS item_regla_metrado
         FROM MTRD_SnapshotItem
         WHERE MTRD_SnapshotItem_KEY_Snapshot IN (?)
         ORDER BY MTRD_SnapshotItem_KEY_Snapshot ASC, MTRD_SnapshotItem_Orden ASC
       `, [snapshotIds]))[0]
       : [];
 
+    const [revitExportRows] = await this.pool.query(`
+      SELECT
+        MTRD_RevitExport_KEY_Proyecto AS project_id,
+        MTRD_RevitExport_ID AS export_id,
+        MTRD_RevitExport_UID AS export_uid,
+        MTRD_RevitExport_RutaModelo AS model_path,
+        MTRD_RevitExport_RevitVersion AS revit_version,
+        MTRD_RevitExport_AddinVersion AS addin_version,
+        MTRD_RevitExport_UsuarioNombre AS user_name,
+        MTRD_RevitExport_FechaExportacion AS exported_at,
+        MTRD_RevitExport_TotalElementos AS total_rows,
+        MTRD_RevitExport_TotalCantidad AS total_quantity,
+        MTRD_RevitExport_TotalItemsVinculados AS linked_items,
+        MTRD_RevitExport_CreadoEn AS created_at
+      FROM MTRD_RevitExport
+      WHERE MTRD_RevitExport_KEY_Proyecto IN (?)
+      ORDER BY MTRD_RevitExport_KEY_Proyecto ASC,
+        MTRD_RevitExport_FechaExportacion DESC,
+        MTRD_RevitExport_ID DESC
+    `, [projectIds]);
+
+    const latestRevitMetaKeys = projectRows.map((row) => `revit:lastExport:${row.project_uid}`);
+    const [latestRevitMetaRows] = latestRevitMetaKeys.length > 0
+      ? await this.pool.query(`
+        SELECT
+          MTRD_AppMeta_Clave AS meta_key,
+          MTRD_AppMeta_Valor AS meta_value
+        FROM MTRD_AppMeta
+        WHERE MTRD_AppMeta_Clave IN (?)
+      `, [latestRevitMetaKeys])
+      : [[]];
+
     const itemsByProject = groupRowsByKey(itemRows, "project_id");
     const collapsedByProject = groupRowsByKey(collapsedRows, "project_id");
     const auditsByProject = groupRowsByKey(auditRows, "project_id");
     const snapshotsByProject = groupRowsByKey(snapshotRows, "project_id");
     const snapshotItemsBySnapshot = groupRowsByKey(snapshotItemRows, "snapshot_id");
+    const revitExportsByProject = groupRowsByKey(revitExportRows, "project_id");
+    const latestRevitExportByProjectUid = new Map(
+      latestRevitMetaRows
+        .map((entry) => {
+          const key = String(entry.meta_key || "");
+          const projectUid = key.startsWith("revit:lastExport:")
+            ? key.slice("revit:lastExport:".length)
+            : "";
+          const value = parseJsonObject(entry.meta_value);
+          return projectUid && value ? [projectUid, value] : null;
+        })
+        .filter(Boolean),
+    );
 
     const projects = projectRows.map((projectRow) => {
       const projectItems = itemsByProject.get(projectRow.project_id) || [];
       const projectCollapsed = collapsedByProject.get(projectRow.project_id) || [];
       const projectAudits = auditsByProject.get(projectRow.project_id) || [];
       const projectSnapshots = snapshotsByProject.get(projectRow.project_id) || [];
+      const projectRevitExports = revitExportsByProject.get(projectRow.project_id) || [];
+      const latestRevitExport = projectRevitExports[0] || latestRevitExportByProjectUid.get(projectRow.project_uid) || null;
 
       const snapshotsById = new Map(projectSnapshots.map((snapshot) => [snapshot.snapshot_id, snapshot.snapshot_uid]));
       const snapshots = projectSnapshots.map((snapshot) => {
-        const rows = (snapshotItemsBySnapshot.get(snapshot.snapshot_id) || []).map((entry) => ({
+        const rows = addCodigoPartidaToRows((snapshotItemsBySnapshot.get(snapshot.snapshot_id) || []).map((entry) => ({
           id: entry.item_uid,
           level: Number(entry.item_level || 0),
           codificacion: entry.item_codificacion || "",
-          descripcion: entry.item_descripcion || "",
+          descripcion: normalizeDescriptionText(entry.item_descripcion),
           unidad: entry.item_unidad || "",
           costo: normalizeDecimalString(entry.item_costo),
           metradoTradicional: normalizeDecimalString(entry.item_metrado_tradicional),
           metradoBim: normalizeDecimalString(entry.item_metrado_bim),
           tipoMetrado: entry.item_tipo_metrado || "",
-        }));
+          reglaMetrado: normalizeReglaMetrado(entry.item_tipo_metrado, entry.item_regla_metrado),
+        })));
 
         return {
           id: snapshot.snapshot_uid,
@@ -584,17 +882,18 @@ class MySQLStorage {
       return {
         id: projectRow.project_uid,
         name: projectRow.project_name,
-        rows: projectItems.map((entry) => ({
+        rows: addCodigoPartidaToRows(projectItems.map((entry) => ({
           id: entry.item_uid,
           level: Number(entry.item_level || 0),
           codificacion: entry.item_codificacion || "",
-          descripcion: entry.item_descripcion || "",
+          descripcion: normalizeDescriptionText(entry.item_descripcion),
           unidad: entry.item_unidad || "",
           costo: normalizeDecimalString(entry.item_costo),
           metradoTradicional: normalizeDecimalString(entry.item_metrado_tradicional),
           metradoBim: normalizeDecimalString(entry.item_metrado_bim),
           tipoMetrado: entry.item_tipo_metrado || "",
-        })),
+          reglaMetrado: normalizeReglaMetrado(entry.item_tipo_metrado, entry.item_regla_metrado),
+        }))),
         auditEntries: projectAudits.map((entry) => ({
           id: `audit-${entry.audit_id}`,
           rowId: entry.item_uid,
@@ -610,6 +909,21 @@ class MySQLStorage {
           timestamp: normalizeIsoString(entry.event_at),
         })),
         snapshots,
+        latestRevitExport: latestRevitExport
+          ? {
+            id: latestRevitExport.export_id ?? latestRevitExport.id ?? null,
+            uid: latestRevitExport.export_uid || latestRevitExport.uid || "",
+            modelPath: latestRevitExport.model_path || latestRevitExport.modelPath || "",
+            revitVersion: latestRevitExport.revit_version || latestRevitExport.revitVersion || "",
+            addinVersion: latestRevitExport.addin_version || latestRevitExport.addinVersion || "",
+            userName: latestRevitExport.user_name || latestRevitExport.userName || "Revit Addin",
+            exportedAt: normalizeIsoString(latestRevitExport.exported_at || latestRevitExport.exportedAt),
+            createdAt: normalizeIsoString(latestRevitExport.created_at || latestRevitExport.createdAt),
+            totalRows: Number(latestRevitExport.total_rows ?? latestRevitExport.totalRows ?? 0),
+            totalQuantity: Number(latestRevitExport.total_quantity ?? latestRevitExport.totalQuantity ?? 0),
+            linkedItems: Number(latestRevitExport.linked_items ?? latestRevitExport.linkedItems ?? 0),
+          }
+          : null,
         collapsedIds: projectCollapsed.map((entry) => entry.item_uid).filter(Boolean),
         createdAt: normalizeIsoString(projectRow.created_at),
         updatedAt: normalizeIsoString(projectRow.updated_at),
@@ -632,18 +946,123 @@ class MySQLStorage {
     };
   }
 
+  async loadRevitImportState(projectUid = "") {
+    await this.ensureReady();
+    const [projectRows] = await this.pool.query(`
+      SELECT
+        MTRD_Proyecto_ID AS project_id,
+        MTRD_Proyecto_UID AS project_uid,
+        MTRD_Proyecto_Nombre AS project_name
+      FROM MTRD_Proyecto
+      WHERE MTRD_Proyecto_Estado = 1
+      ORDER BY MTRD_Proyecto_CreadoEn ASC, MTRD_Proyecto_Nombre ASC
+    `);
+
+    if (projectRows.length === 0) {
+      return {
+        currentProjectId: null,
+        projectId: null,
+        projectName: "",
+        project: null,
+        rows: [],
+      };
+    }
+
+    const requestedProjectUid = normalizeIdentifier(projectUid, "");
+    const [metaRows] = await this.pool.query(`
+      SELECT MTRD_AppMeta_Valor AS current_project_id
+      FROM MTRD_AppMeta
+      WHERE MTRD_AppMeta_Clave = 'currentProjectId'
+      LIMIT 1
+    `);
+    const storedCurrentProjectId = metaRows[0]?.current_project_id || "";
+    const selectedProjectUid = resolveExistingProjectUid(
+      projectRows,
+      requestedProjectUid,
+    ) || resolveExistingProjectUid(
+      projectRows,
+      storedCurrentProjectId,
+    ) || projectRows[0].project_uid;
+    const selectedProject = projectRows.find((project) => project.project_uid === selectedProjectUid)
+      || projectRows[0];
+
+    const [itemRows] = await this.pool.query(`
+      SELECT
+        MTRD_Item_UID AS item_uid,
+        MTRD_Item_Nivel AS item_level,
+        MTRD_Item_Codificacion AS item_codificacion,
+        MTRD_Item_Descripcion AS item_descripcion,
+        MTRD_Item_Unidad AS item_unidad,
+        MTRD_Item_Costo AS item_costo,
+        MTRD_Item_MetradoBim AS item_metrado_bim,
+        MTRD_Item_TipoMetrado AS item_tipo_metrado,
+        MTRD_Item_ReglaMetrado AS item_regla_metrado
+      FROM MTRD_Item
+      WHERE MTRD_Item_KEY_Proyecto = ?
+      ORDER BY MTRD_Item_Orden ASC
+    `, [selectedProject.project_id]);
+
+    const rows = addCodigoPartidaToRows(itemRows.map((entry) => ({
+      id: entry.item_uid,
+      level: Number(entry.item_level || 0),
+      codificacion: entry.item_codificacion || "",
+      descripcion: normalizeDescriptionText(entry.item_descripcion),
+      unidad: entry.item_unidad || "",
+      costo: normalizeDecimalString(entry.item_costo),
+      metradoBim: normalizeDecimalString(entry.item_metrado_bim),
+      tipoMetrado: entry.item_tipo_metrado || "",
+      reglaMetrado: normalizeReglaMetrado(entry.item_tipo_metrado, entry.item_regla_metrado),
+    })));
+
+    const project = {
+      id: selectedProject.project_uid,
+      name: selectedProject.project_name,
+      rows,
+    };
+
+    return {
+      currentProjectId: selectedProject.project_uid,
+      projectId: selectedProject.project_uid,
+      projectName: selectedProject.project_name,
+      project,
+      rows,
+    };
+  }
+
   async persistState(payload) {
     await this.ensureReady();
     const connection = await this.pool.getConnection();
 
     try {
       await connection.beginTransaction();
-      await connection.query("DELETE FROM MTRD_SnapshotItem");
-      await connection.query("DELETE FROM MTRD_Snapshot");
-      await connection.query("DELETE FROM MTRD_AuditoriaItem");
-      await connection.query("DELETE FROM MTRD_ItemColapsado");
-      await connection.query("DELETE FROM MTRD_Item");
-      await connection.query("DELETE FROM MTRD_Proyecto");
+      const [existingProjectRows] = await connection.query(`
+        SELECT
+          MTRD_Proyecto_ID AS project_id,
+          MTRD_Proyecto_UID AS project_uid,
+          MTRD_Proyecto_Estado AS project_state
+        FROM MTRD_Proyecto
+      `);
+      const existingProjectByUid = new Map(
+        existingProjectRows.map((row) => [String(row.project_uid || ""), row]),
+      );
+      const incomingProjectUids = new Set(
+        payload.projects.map((project, index) => (
+          normalizeIdentifier(project.id, `project-${index + 1}`)
+        )),
+      );
+      const inactiveProjectIds = existingProjectRows
+        .filter((row) => !incomingProjectUids.has(String(row.project_uid || "")))
+        .map((row) => row.project_id)
+        .filter(Boolean);
+      if (inactiveProjectIds.length > 0) {
+        await connection.query(`
+          UPDATE MTRD_Proyecto
+          SET
+            MTRD_Proyecto_Estado = 0,
+            MTRD_Proyecto_ActualizadoEn = CURRENT_TIMESTAMP
+          WHERE MTRD_Proyecto_ID IN (?)
+        `, [inactiveProjectIds]);
+      }
       await connection.query(`
         DELETE FROM MTRD_AppMeta
         WHERE MTRD_AppMeta_Clave = 'currentProjectId'
@@ -651,58 +1070,165 @@ class MySQLStorage {
 
       for (let projectIndex = 0; projectIndex < payload.projects.length; projectIndex += 1) {
         const project = payload.projects[projectIndex];
+        const projectUid = normalizeIdentifier(project.id, `project-${projectIndex + 1}`);
         const createdAt = toMySqlDateTime(project.createdAt);
         const updatedAt = toMySqlDateTime(project.updatedAt || project.createdAt);
+        const existingProject = existingProjectByUid.get(projectUid);
+        let projectId = existingProject?.project_id || null;
 
-        const [projectInsert] = await connection.query(`
-          INSERT INTO MTRD_Proyecto (
-            MTRD_Proyecto_UID,
-            MTRD_Proyecto_Nombre,
-            MTRD_Proyecto_CreadoEn,
-            MTRD_Proyecto_ActualizadoEn,
-            MTRD_Proyecto_Estado
-          ) VALUES (?, ?, ?, ?, 1)
-        `, [
-          normalizeIdentifier(project.id, `project-${projectIndex + 1}`),
-          normalizeText(project.name, `Proyecto ${projectIndex + 1}`),
-          createdAt,
-          updatedAt,
-        ]);
-        const projectId = projectInsert.insertId;
+        if (projectId) {
+          await connection.query(`
+            UPDATE MTRD_Proyecto
+            SET
+              MTRD_Proyecto_Nombre = ?,
+              MTRD_Proyecto_ActualizadoEn = ?,
+              MTRD_Proyecto_Estado = 1
+            WHERE MTRD_Proyecto_ID = ?
+          `, [
+            normalizeText(project.name, `Proyecto ${projectIndex + 1}`),
+            updatedAt,
+            projectId,
+          ]);
+        } else {
+          const [projectInsert] = await connection.query(`
+            INSERT INTO MTRD_Proyecto (
+              MTRD_Proyecto_UID,
+              MTRD_Proyecto_Nombre,
+              MTRD_Proyecto_CreadoEn,
+              MTRD_Proyecto_ActualizadoEn,
+              MTRD_Proyecto_Estado
+            ) VALUES (?, ?, ?, ?, 1)
+          `, [
+            projectUid,
+            normalizeText(project.name, `Proyecto ${projectIndex + 1}`),
+            createdAt,
+            updatedAt,
+          ]);
+          projectId = projectInsert.insertId;
+          existingProjectByUid.set(projectUid, {
+            project_id: projectId,
+            project_uid: projectUid,
+            project_state: 1,
+          });
+        }
+
+        await connection.query(`
+          DELETE FROM MTRD_ItemColapsado
+          WHERE MTRD_ItemColapsado_KEY_Proyecto = ?
+        `, [projectId]);
+        await connection.query(`
+          DELETE FROM MTRD_AuditoriaItem
+          WHERE MTRD_AuditoriaItem_KEY_Proyecto = ?
+        `, [projectId]);
+        await connection.query(`
+          DELETE snapshotItem
+          FROM MTRD_SnapshotItem snapshotItem
+          INNER JOIN MTRD_Snapshot snapshot
+            ON snapshot.MTRD_Snapshot_ID = snapshotItem.MTRD_SnapshotItem_KEY_Snapshot
+          WHERE snapshot.MTRD_Snapshot_KEY_Proyecto = ?
+        `, [projectId]);
+        await connection.query(`
+          DELETE FROM MTRD_Snapshot
+          WHERE MTRD_Snapshot_KEY_Proyecto = ?
+        `, [projectId]);
 
         const rows = Array.isArray(project.rows) ? project.rows : [];
         const itemIdByUid = new Map();
+        const [existingItemRows] = await connection.query(`
+          SELECT
+            MTRD_Item_ID AS item_id,
+            MTRD_Item_UID AS item_uid,
+            MTRD_Item_MetradoBim AS item_metrado_bim
+          FROM MTRD_Item
+          WHERE MTRD_Item_KEY_Proyecto = ?
+          FOR UPDATE
+        `, [projectId]);
+        const existingItemByUid = new Map(
+          existingItemRows.map((row) => [String(row.item_uid || ""), row]),
+        );
+        const incomingItemUids = new Set();
+        if (existingItemRows.length > 0) {
+          await connection.query(`
+            UPDATE MTRD_Item
+            SET MTRD_Item_Orden = MTRD_Item_Orden + 1000000
+            WHERE MTRD_Item_KEY_Proyecto = ?
+          `, [projectId]);
+        }
+
         for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
           const row = rows[rowIndex];
           const rowUid = normalizeIdentifier(row.id, `row-${projectIndex + 1}-${rowIndex + 1}`);
-          const [itemInsert] = await connection.query(`
-            INSERT INTO MTRD_Item (
-              MTRD_Item_KEY_Proyecto,
-              MTRD_Item_UID,
-              MTRD_Item_Orden,
-              MTRD_Item_Nivel,
-              MTRD_Item_Codificacion,
-              MTRD_Item_Descripcion,
-              MTRD_Item_Unidad,
-              MTRD_Item_Costo,
-              MTRD_Item_MetradoTradicional,
-              MTRD_Item_MetradoBim,
-              MTRD_Item_TipoMetrado
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `, [
-            projectId,
-            rowUid,
+          const existingItem = existingItemByUid.get(rowUid);
+          const metradoBim = existingItem
+            ? parseDecimal(existingItem.item_metrado_bim)
+            : parseDecimal(row.metradoBim);
+          incomingItemUids.add(rowUid);
+
+          const itemValues = [
             rowIndex + 1,
             Number.parseInt(row.level || 0, 10) || 0,
             String(row.codificacion || ""),
-            String(row.descripcion || ""),
+            normalizeDescriptionText(row.descripcion),
             String(row.unidad || ""),
             parseDecimal(row.costo),
             parseDecimal(row.metradoTradicional ?? row.metrado),
-            parseDecimal(row.metradoBim),
+            metradoBim,
             String(row.tipoMetrado || ""),
-          ]);
-          itemIdByUid.set(rowUid, itemInsert.insertId);
+            normalizeReglaMetrado(row.tipoMetrado, row.reglaMetrado),
+          ];
+
+          if (existingItem?.item_id) {
+            await connection.query(`
+              UPDATE MTRD_Item
+              SET
+                MTRD_Item_Orden = ?,
+                MTRD_Item_Nivel = ?,
+                MTRD_Item_Codificacion = ?,
+                MTRD_Item_Descripcion = ?,
+                MTRD_Item_Unidad = ?,
+                MTRD_Item_Costo = ?,
+                MTRD_Item_MetradoTradicional = ?,
+                MTRD_Item_MetradoBim = ?,
+                MTRD_Item_TipoMetrado = ?,
+                MTRD_Item_ReglaMetrado = ?,
+                MTRD_Item_ActualizadoEn = CURRENT_TIMESTAMP
+              WHERE MTRD_Item_ID = ?
+            `, [...itemValues, existingItem.item_id]);
+            itemIdByUid.set(rowUid, existingItem.item_id);
+          } else {
+            const [itemInsert] = await connection.query(`
+              INSERT INTO MTRD_Item (
+                MTRD_Item_KEY_Proyecto,
+                MTRD_Item_UID,
+                MTRD_Item_Orden,
+                MTRD_Item_Nivel,
+                MTRD_Item_Codificacion,
+                MTRD_Item_Descripcion,
+                MTRD_Item_Unidad,
+                MTRD_Item_Costo,
+                MTRD_Item_MetradoTradicional,
+                MTRD_Item_MetradoBim,
+                MTRD_Item_TipoMetrado,
+                MTRD_Item_ReglaMetrado
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [
+              projectId,
+              rowUid,
+              ...itemValues,
+            ]);
+            itemIdByUid.set(rowUid, itemInsert.insertId);
+          }
+        }
+
+        const removedItemUids = existingItemRows
+          .map((row) => String(row.item_uid || ""))
+          .filter((itemUid) => itemUid && !incomingItemUids.has(itemUid));
+        if (removedItemUids.length > 0) {
+          await connection.query(`
+            DELETE FROM MTRD_Item
+            WHERE MTRD_Item_KEY_Proyecto = ?
+              AND MTRD_Item_UID IN (?)
+          `, [projectId, removedItemUids]);
         }
 
         const collapsedIds = Array.isArray(project.collapsedIds) ? project.collapsedIds : [];
@@ -826,20 +1352,22 @@ class MySQLStorage {
                 MTRD_SnapshotItem_Costo,
                 MTRD_SnapshotItem_MetradoTradicional,
                 MTRD_SnapshotItem_MetradoBim,
-                MTRD_SnapshotItem_TipoMetrado
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                MTRD_SnapshotItem_TipoMetrado,
+                MTRD_SnapshotItem_ReglaMetrado
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `, [
               snapshotId,
               normalizeIdentifier(row.id, `snapshot-row-${snapshotRowIndex + 1}`),
               snapshotRowIndex + 1,
               Number.parseInt(row.level || 0, 10) || 0,
               String(row.codificacion || ""),
-              String(row.descripcion || ""),
+              normalizeDescriptionText(row.descripcion),
               String(row.unidad || ""),
               parseDecimal(row.costo),
               parseDecimal(row.metradoTradicional ?? row.metrado),
               parseDecimal(row.metradoBim),
               String(row.tipoMetrado || ""),
+              normalizeReglaMetrado(row.tipoMetrado, row.reglaMetrado),
             ]);
           }
         }
@@ -1142,16 +1670,39 @@ class MySQLStorage {
         const entries = Array.from(quantitiesByItemId.entries());
         for (let index = 0; index < entries.length; index += 1) {
           const [itemId, quantity] = entries[index];
-          const [result] = await connection.query(`
+          await connection.query(`
             UPDATE MTRD_Item
             SET
               MTRD_Item_MetradoBim = ?,
               MTRD_Item_ActualizadoEn = CURRENT_TIMESTAMP
             WHERE MTRD_Item_ID = ?
           `, [quantity, itemId]);
-          updatedItems += Number(result.affectedRows || 0);
         }
+        updatedItems = totalItemsVinculados;
       }
+
+      const latestExportMeta = {
+        id: exportId,
+        uid: payload.exportUid,
+        modelPath: payload.modelPath,
+        revitVersion: payload.revitVersion,
+        addinVersion: payload.addinVersion,
+        userName: payload.exportedBy,
+        exportedAt: normalizeIsoString(payload.exportedAt),
+        createdAt: new Date().toISOString(),
+        totalRows: payload.rows.length,
+        totalQuantity,
+        linkedItems: totalItemsVinculados,
+      };
+      await connection.query(`
+        INSERT INTO MTRD_AppMeta (MTRD_AppMeta_Clave, MTRD_AppMeta_Valor)
+        VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE
+          MTRD_AppMeta_Valor = VALUES(MTRD_AppMeta_Valor)
+      `, [
+        `revit:lastExport:${payload.projectId}`,
+        JSON.stringify(latestExportMeta),
+      ]);
 
       await connection.commit();
       return {
@@ -1223,408 +1774,940 @@ class MySQLStorage {
   }
 }
 
-class GoogleAppsScriptStorage {
-  constructor() {
-    this.kind = "google-apps-script";
-    this.label = "Google Sheets (Apps Script)";
-    this.webAppUrl = String(process.env.GOOGLE_APPS_SCRIPT_WEBAPP_URL || "").trim();
-    this.token = String(process.env.GOOGLE_APPS_SCRIPT_TOKEN || "").trim();
-    this.timeoutMs = Number.parseInt(process.env.GOOGLE_APPS_SCRIPT_TIMEOUT_MS || "20000", 10);
-  }
-
-  async getHealth() {
-    try {
-      const payload = await this.callBridge("health", {});
-      return {
-        ok: true,
-        storage: this.kind,
-        webAppUrl: this.webAppUrl,
-        spreadsheetId: payload.spreadsheetId || null,
-        spreadsheetUrl: payload.spreadsheetUrl || null,
-        tabs: payload.tabs || null,
-      };
-    } catch (error) {
-      return {
-        ok: false,
-        storage: this.kind,
-        webAppUrl: this.webAppUrl,
-        detail: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  async loadState() {
-    const payload = await this.callBridge("loadState", {});
-    const state = payload.state || {
-      currentProjectId: null,
-      projects: [],
-    };
-    return normalizeIncomingState(state);
-  }
-
-  async persistState(statePayload) {
-    const payload = await this.callBridge("persistState", {
-      payload: statePayload,
+async function ensureAuthorizedRequest(accessControlManager, request, response, minRole) {
+  const authorization = await accessControlManager.authorizeRequest(request, minRole);
+  if (!authorization.ok) {
+    respondJson(response, authorization.status, {
+      ok: false,
+      error: authorization.error,
+      accessControl: accessControlManager.getPublicSettings(),
     });
-    return {
-      savedAt: payload.savedAt || new Date().toISOString(),
-      spreadsheetId: payload.spreadsheetId || null,
-      spreadsheetUrl: payload.spreadsheetUrl || null,
-    };
+    return null;
   }
 
-  async callBridge(action, extraPayload) {
-    if (!this.webAppUrl) {
-      throw new Error(
-        "Configura GOOGLE_APPS_SCRIPT_WEBAPP_URL para usar Google Sheets sin Google Cloud.",
-      );
-    }
-
-    const timeoutMs = Number.isFinite(this.timeoutMs) && this.timeoutMs > 0 ? this.timeoutMs : 20000;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const response = await fetch(this.webAppUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          action,
-          token: this.token || undefined,
-          ...extraPayload,
-        }),
-        signal: controller.signal,
-      });
-
-      const bodyText = await response.text();
-      const parsed = tryParseJson(bodyText) || {};
-
-      if (!response.ok) {
-        const detail = parsed.detail || parsed.error || bodyText || `HTTP ${response.status}`;
-        throw new Error(`Apps Script devolvio ${response.status}: ${detail}`);
-      }
-
-      if (parsed.ok === false) {
-        throw new Error(parsed.detail || parsed.error || "Apps Script respondio con error.");
-      }
-
-      if (!parsed || typeof parsed !== "object") {
-        throw new Error("Apps Script devolvio una respuesta invalida.");
-      }
-
-      return parsed;
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new Error(`Apps Script no respondio en ${timeoutMs} ms.`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
+  return authorization;
 }
 
-class GoogleSheetsStorage {
-  constructor() {
-    this.kind = "google-sheets";
-    this.label = "Google Sheets";
-    this.sheetNames = {
-      meta: process.env.GOOGLE_SHEETS_META_TAB || "itemicostos_meta",
-      state: process.env.GOOGLE_SHEETS_STATE_TAB || "itemicostos_state",
-      projects: process.env.GOOGLE_SHEETS_PROJECTS_TAB || "itemicostos_projects",
-    };
-    this.spreadsheetId = String(process.env.GOOGLE_SHEETS_SPREADSHEET_ID || "").trim() || null;
-    this.readyPromise = null;
+function createAccessControlManager(filePath, options = {}) {
+  const enabled = parseBooleanEnv(process.env.ACCESS_CONTROL_ENABLED, true);
+  const roleRank = {
+    viewer: 1,
+    editor: 2,
+    admin: 3,
+    superadmin: 4,
+  };
+  const superAdminEmail = normalizeAuthEmail(
+    process.env.ACCESS_SUPERADMIN_EMAIL || "rjason381@gmail.com",
+  );
+  const googleAuthEnabled = parseBooleanEnv(process.env.ACCESS_GOOGLE_AUTH_ENABLED, true);
+  const googleClientId = String(process.env.GOOGLE_AUTH_CLIENT_ID || "").trim();
+  const configuredSessionTtlHours = Number.parseInt(
+    String(process.env.ACCESS_SESSION_TTL_HOURS || "12"),
+    10,
+  );
+  const sessionTtlHours =
+    Number.isFinite(configuredSessionTtlHours) && configuredSessionTtlHours > 0
+      ? configuredSessionTtlHours
+      : 12;
+  const sessionTtlMs = sessionTtlHours * 60 * 60 * 1000;
+  const configuredUsersSyncMs = Number.parseInt(
+    String(process.env.ACCESS_USERS_SYNC_MS || "10000"),
+    10,
+  );
+  const usersSyncMs =
+    Number.isFinite(configuredUsersSyncMs) && configuredUsersSyncMs > 0
+      ? configuredUsersSyncMs
+      : 10000;
+  const prefersRemoteUsersStore = false;
+  const sessions = new Map();
+  let lastUsersSyncAt = 0;
+  let disableExternalUsersStore = false;
+  let externalUsersStoreDisabledReason = "";
 
-    const authConfig = {
-      scopes: googleSheetsScopes,
-    };
-    const inlineCredentials = readInlineServiceAccountCredentials();
-    if (inlineCredentials) {
-      authConfig.credentials = inlineCredentials;
-    }
+  const store = loadOrBootstrapStore();
 
-    this.auth = new google.auth.GoogleAuth(authConfig);
-    this.sheets = google.sheets({
-      version: "v4",
-      auth: this.auth,
-    });
-  }
-
-  async getHealth() {
-    try {
-      await this.ensureReady();
+  return {
+    isEnabled() {
+      return enabled;
+    },
+    getSuperAdminEmail() {
+      return superAdminEmail;
+    },
+    getPublicSettings() {
       return {
-        ok: true,
-        storage: this.kind,
-        spreadsheetId: this.spreadsheetId,
-        spreadsheetUrl: getSpreadsheetUrl(this.spreadsheetId),
-        tabs: this.sheetNames,
+        enabled,
+        sessionTtlHours,
+        googleAuthEnabled: enabled && googleAuthEnabled,
+        googleClientId: enabled && googleAuthEnabled ? googleClientId : "",
       };
-    } catch (error) {
-      return {
-        ok: false,
-        storage: this.kind,
-        detail: error instanceof Error ? error.message : String(error),
-        spreadsheetId: this.spreadsheetId,
-      };
-    }
-  }
-
-  async loadState() {
-    await this.ensureReady();
-
-    const { data } = await this.sheets.spreadsheets.values.batchGet({
-      spreadsheetId: this.spreadsheetId,
-      ranges: [
-        `${this.sheetNames.meta}!A:B`,
-        `${this.sheetNames.state}!A:B`,
-      ],
-    });
-
-    const stateRange = (data.valueRanges || [])[1]?.values || [];
-    const serializedState = joinChunkedStateRows(stateRange);
-    if (!serializedState) {
-      return {
-        currentProjectId: null,
-        projects: [],
-      };
-    }
-
-    const parsed = JSON.parse(serializedState);
-    return normalizeIncomingState(parsed);
-  }
-
-  async persistState(payload) {
-    await this.ensureReady();
-
-    const savedAt = new Date().toISOString();
-    const serializedState = JSON.stringify(payload);
-    const stateRows = [
-      ["chunkIndex", "jsonChunk"],
-      ...chunkText(serializedState, 40000).map((chunk, index) => [String(index + 1), chunk]),
-    ];
-    const metaRows = [
-      ["key", "value"],
-      ["savedAt", savedAt],
-      ["currentProjectId", payload.currentProjectId || ""],
-      ["projectCount", String(payload.projects.length)],
-      ["storage", this.kind],
-    ];
-    const projectSummaryRows = buildProjectSummaryRows(payload.projects);
-
-    await this.sheets.spreadsheets.values.batchClear({
-      spreadsheetId: this.spreadsheetId,
-      requestBody: {
-        ranges: [
-          `${this.sheetNames.meta}!A:Z`,
-          `${this.sheetNames.state}!A:Z`,
-          `${this.sheetNames.projects}!A:Z`,
-        ],
-      },
-    });
-
-    await this.sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: this.spreadsheetId,
-      requestBody: {
-        valueInputOption: "RAW",
-        data: [
-          {
-            range: `${this.sheetNames.meta}!A1`,
-            majorDimension: "ROWS",
-            values: metaRows,
-          },
-          {
-            range: `${this.sheetNames.state}!A1`,
-            majorDimension: "ROWS",
-            values: stateRows,
-          },
-          {
-            range: `${this.sheetNames.projects}!A1`,
-            majorDimension: "ROWS",
-            values: projectSummaryRows,
-          },
-        ],
-      },
-    });
-
-    return {
-      savedAt,
-      spreadsheetId: this.spreadsheetId,
-      spreadsheetUrl: getSpreadsheetUrl(this.spreadsheetId),
-    };
-  }
-
-  async ensureReady() {
-    if (!this.readyPromise) {
-      this.readyPromise = this.initialize().catch((error) => {
-        this.readyPromise = null;
-        throw error;
-      });
-    }
-
-    return this.readyPromise;
-  }
-
-  async initialize() {
-    this.spreadsheetId = await this.resolveSpreadsheetId();
-    await this.ensureSheetsStructure();
-    return this.spreadsheetId;
-  }
-
-  async resolveSpreadsheetId() {
-    if (this.spreadsheetId) {
-      return this.spreadsheetId;
-    }
-
-    const savedConfig = readSavedGoogleSheetsConfig();
-    if (savedConfig.spreadsheetId) {
-      this.spreadsheetId = savedConfig.spreadsheetId;
-      return this.spreadsheetId;
-    }
-
-    if (process.env.GOOGLE_SHEETS_CREATE_IF_MISSING === "true") {
-      const createdSpreadsheet = await this.sheets.spreadsheets.create({
-        requestBody: {
-          properties: {
-            title: process.env.GOOGLE_SHEETS_TITLE || "Itemicostos",
-          },
-          sheets: Object.values(this.sheetNames).map((title) => ({
-            properties: { title },
-          })),
-        },
-        fields: "spreadsheetId,spreadsheetUrl",
-      });
-
-      const spreadsheetId = createdSpreadsheet.data.spreadsheetId;
-      if (!spreadsheetId) {
-        throw new Error("Google Sheets no devolvio un spreadsheetId.");
+    },
+    async loginWithGoogle(idTokenInput) {
+      if (!enabled) {
+        return {
+          ok: false,
+          status: 409,
+          error: "Control de accesos deshabilitado.",
+        };
       }
 
-      this.spreadsheetId = spreadsheetId;
-      writeSavedGoogleSheetsConfig({
-        spreadsheetId,
-        spreadsheetUrl: createdSpreadsheet.data.spreadsheetUrl || getSpreadsheetUrl(spreadsheetId),
+      if (!googleAuthEnabled) {
+        return {
+          ok: false,
+          status: 409,
+          error: "Inicio de sesion con Google deshabilitado.",
+        };
+      }
+
+      if (!googleClientId) {
+        return {
+          ok: false,
+          status: 500,
+          error: "Falta configurar GOOGLE_AUTH_CLIENT_ID en el backend.",
+        };
+      }
+
+      const idToken = String(idTokenInput || "").trim();
+      if (!idToken) {
+        return {
+          ok: false,
+          status: 400,
+          error: "idToken es obligatorio.",
+        };
+      }
+
+      const usersSyncPromise = ensureUsersStoreSynchronized();
+      const verification = await verifyGoogleIdToken(idToken, googleClientId);
+      if (!verification.ok) {
+        usersSyncPromise.catch(() => {});
+        return {
+          ok: false,
+          status: 401,
+          error: verification.error,
+        };
+      }
+
+      const googlePayload = verification.payload;
+      const email = normalizeAuthEmail(googlePayload.email);
+      if (!email) {
+        return {
+          ok: false,
+          status: 401,
+          error: "No se pudo validar el correo de Google.",
+        };
+      }
+
+      const verifiedFlag = String(googlePayload.email_verified || "").toLowerCase();
+      if (!(verifiedFlag === "true" || verifiedFlag === "1")) {
+        usersSyncPromise.catch(() => {});
+        return {
+          ok: false,
+          status: 401,
+          error: "Tu correo de Google no esta verificado.",
+        };
+      }
+
+      await usersSyncPromise;
+      let user = getUserByEmail(email);
+      if (email === superAdminEmail) {
+        user = await ensureSuperAdminUser(user, googlePayload.name || "Superadmin");
+      }
+
+      if (!user || !user.active) {
+        return {
+          ok: false,
+          status: 403,
+          error: "Usuario no autorizado para acceder.",
+        };
+      }
+      if (!userCanAccessAnyProject(user)) {
+        return {
+          ok: false,
+          status: 403,
+          error: "Tu cuenta no tiene proyectos asignados. Contacta al superadmin.",
+        };
+      }
+
+      const token = createSessionToken();
+      const expiresAt = Date.now() + sessionTtlMs;
+      const profileImageUrl = normalizeProfileImageUrl(googlePayload.picture || "");
+      sessions.set(token, {
+        token,
+        email: user.email,
+        expiresAt,
+        profileImageUrl,
       });
-      return this.spreadsheetId;
+      await persistSessionStore({
+        token,
+        email: user.email,
+        expiresAt,
+        profileImageUrl,
+      });
+
+      return {
+        ok: true,
+        status: 200,
+        token,
+        expiresAt,
+        user: toPublicUser(user, { profileImageUrl }),
+      };
+    },
+    async authorizeRequest(request, minRole = "viewer", optionsInput = {}) {
+      if (!enabled) {
+        return {
+          ok: true,
+          status: 200,
+          token: "",
+          user: {
+            email: "sistema@local",
+            role: "superadmin",
+            displayName: "Sistema local",
+          },
+        };
+      }
+
+      const requestedRole = normalizeAuthRole(minRole, "viewer");
+      const token = readRequestSessionToken(request);
+      if (!token) {
+        return {
+          ok: false,
+          status: 401,
+          error: "Sesion no autenticada.",
+        };
+      }
+
+      pruneExpiredSessions();
+      let session = sessions.get(token);
+      if (!session) {
+        session = await loadSessionFromStore(token);
+        if (session) {
+          sessions.set(token, session);
+        }
+      }
+      if (!session || session.expiresAt <= Date.now()) {
+        sessions.delete(token);
+        await deleteSessionFromStore(token);
+        return {
+          ok: false,
+          status: 401,
+          error: "Sesion expirada o invalida.",
+        };
+      }
+
+      await ensureUsersStoreSynchronized(Boolean(optionsInput.forceUserSync));
+      const user = getUserByEmail(session.email);
+      if (!user || !user.active) {
+        sessions.delete(token);
+        await deleteSessionFromStore(token);
+        return {
+          ok: false,
+          status: 401,
+          error: "Sesion expirada o invalida.",
+        };
+      }
+
+      if (!userHasRole(user.role, requestedRole)) {
+        return {
+          ok: false,
+          status: 403,
+          error: "No tienes permisos para esta accion.",
+        };
+      }
+
+      session.expiresAt = Date.now() + sessionTtlMs;
+      sessions.set(token, session);
+      await persistSessionStore(session);
+
+      return {
+        ok: true,
+        status: 200,
+        token,
+        expiresAt: session.expiresAt,
+        user: toPublicUser(user, { profileImageUrl: session.profileImageUrl }),
+      };
+    },
+    async logoutByToken(token) {
+      if (!enabled) {
+        return;
+      }
+      const safeToken = String(token || "").trim();
+      if (!safeToken) {
+        return;
+      }
+      sessions.delete(safeToken);
+      await deleteSessionFromStore(safeToken);
+    },
+    async listUsers() {
+      await ensureUsersStoreSynchronized();
+      return [...store.users]
+        .map((user) => toPublicUser(user))
+        .sort((left, right) => left.email.localeCompare(right.email));
+    },
+    async upsertUser(payload, actorUser, optionsInput = {}) {
+      if (!enabled) {
+        return {
+          ok: false,
+          status: 409,
+          error: "Control de accesos deshabilitado.",
+        };
+      }
+
+      await ensureUsersStoreSynchronized(true);
+      const actorRole = normalizeAuthRole(actorUser?.role, "viewer");
+      const actorCanManageSuperAdmin = actorRole === "superadmin";
+      if (!userHasRole(actorRole, "superadmin")) {
+        return {
+          ok: false,
+          status: 403,
+          error: "Solo un superadmin puede gestionar usuarios.",
+        };
+      }
+
+      const email = normalizeAuthEmail(payload?.email);
+      if (!email) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Email invalido.",
+        };
+      }
+
+      const requestedRole = normalizeAuthRole(payload?.role, "viewer");
+      if (requestedRole === "superadmin" && !actorCanManageSuperAdmin) {
+        return {
+          ok: false,
+          status: 403,
+          error: "Solo un superadmin puede asignar rol superadmin.",
+        };
+      }
+
+      const existing = getUserByEmail(email);
+      if (existing && existing.role === "superadmin" && !actorCanManageSuperAdmin) {
+        return {
+          ok: false,
+          status: 403,
+          error: "Solo un superadmin puede editar a otro superadmin.",
+        };
+      }
+
+      const displayName = normalizeText(
+        payload?.displayName,
+        existing?.displayName || email,
+      );
+      const active = payload?.active !== false;
+      const availableProjectIds = normalizeProjectIdsForUser(
+        optionsInput?.availableProjectIds,
+        { allowWildcard: false },
+      );
+      const availableProjectIdSet = new Set(availableProjectIds);
+      const requestedProjectIds = normalizeProjectIdsForUser(
+        payload?.projectIds,
+        { allowWildcard: false },
+      );
+      const projectIds = requestedRole === "superadmin"
+        ? ["*"]
+        : requestedProjectIds.filter((projectId) => (
+          availableProjectIdSet.size === 0 || availableProjectIdSet.has(projectId)
+        ));
+      if (requestedRole !== "superadmin" && active && availableProjectIdSet.size > 0 && projectIds.length === 0) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Debes asignar al menos un proyecto al usuario activo.",
+        };
+      }
+
+      if (existing) {
+        existing.displayName = displayName;
+        existing.role = requestedRole;
+        existing.active = active;
+        existing.projectIds = projectIds;
+        existing.updatedAt = new Date().toISOString();
+
+        if (!canPersistSuperAdminState(existing.email, existing.role, existing.active)) {
+          return {
+            ok: false,
+            status: 400,
+            error: "Debe existir al menos un superadmin activo.",
+          };
+        }
+
+        await persistUsersStore();
+        return {
+          ok: true,
+          status: 200,
+          user: toPublicUser(existing),
+        };
+      }
+
+      const createdAt = new Date().toISOString();
+      const user = {
+        id: randomUUID(),
+        email,
+        displayName,
+        role: requestedRole,
+        active,
+        projectIds,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      store.users.push(user);
+      if (!canPersistSuperAdminState()) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Debe existir al menos un superadmin activo.",
+        };
+      }
+      await persistUsersStore();
+
+      return {
+        ok: true,
+        status: 200,
+        user: toPublicUser(user),
+      };
+    },
+  };
+
+  function loadOrBootstrapStore() {
+    const fallbackStore = {
+      version: 1,
+      users: [],
+    };
+
+    if (!enabled) {
+      return fallbackStore;
     }
 
-    throw new Error(
-      "Configura GOOGLE_SHEETS_SPREADSHEET_ID o activa GOOGLE_SHEETS_CREATE_IF_MISSING=true.",
+    let shouldWriteStore = false;
+    let parsedStore = fallbackStore;
+
+    try {
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, "utf8");
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && Array.isArray(parsed.users)) {
+          parsedStore = {
+            version: Number(parsed.version || 1),
+            users: parsed.users
+              .map((user) => sanitizeStoredUser(user))
+              .filter(Boolean),
+          };
+          const hasLegacyPasswordFields = parsed.users.some((user) => {
+            if (!user || typeof user !== "object") {
+              return false;
+            }
+            return "passwordHash" in user || "passwordSalt" in user;
+          });
+          if (hasLegacyPasswordFields) {
+            shouldWriteStore = true;
+          }
+        } else {
+          shouldWriteStore = true;
+        }
+      } else if (!prefersRemoteUsersStore) {
+        shouldWriteStore = true;
+      }
+    } catch {
+      shouldWriteStore = !prefersRemoteUsersStore;
+      parsedStore = fallbackStore;
+    }
+
+    const hasSuperAdmin = parsedStore.users.some(
+      (user) => user.email === superAdminEmail && user.active && user.role === "superadmin",
     );
+    if (!hasSuperAdmin) {
+      parsedStore.users.push(
+        createUserRecord({
+          email: superAdminEmail,
+          role: "superadmin",
+          displayName: "Superadmin",
+          active: true,
+        }),
+      );
+      shouldWriteStore = true;
+    }
+
+    if (shouldWriteStore && !prefersRemoteUsersStore) {
+      writeStoreFile(parsedStore);
+    }
+
+    return parsedStore;
   }
 
-  async ensureSheetsStructure() {
-    const { data } = await this.sheets.spreadsheets.get({
-      spreadsheetId: this.spreadsheetId,
-      fields: "sheets.properties.title",
-    });
-    const existingTitles = new Set(
-      (data.sheets || [])
-        .map((sheet) => sheet.properties?.title)
-        .filter(Boolean),
-    );
-    const missingTitles = Object.values(this.sheetNames).filter((title) => !existingTitles.has(title));
+  function sanitizeStoredUser(user) {
+    if (!user || typeof user !== "object") {
+      return null;
+    }
 
-    if (missingTitles.length === 0) {
+    const email = normalizeAuthEmail(user.email);
+    if (!email) {
+      return null;
+    }
+
+    const role = normalizeAuthRole(user.role, email === superAdminEmail ? "superadmin" : "viewer");
+    const displayName = normalizeText(user.displayName, email);
+    const active = user.active !== false;
+    const projectIds = normalizeProjectIdsForUser(
+      user.projectIds,
+      { allowWildcard: role === "superadmin" },
+    );
+    const createdAt = normalizeIsoString(user.createdAt || Date.now());
+    const updatedAt = normalizeIsoString(user.updatedAt || createdAt);
+
+    return {
+      id: normalizeIdentifier(user.id, randomUUID()),
+      email,
+      displayName,
+      role,
+      active,
+      projectIds: role === "superadmin" ? ["*"] : projectIds,
+      createdAt,
+      updatedAt,
+    };
+  }
+
+  function createUserRecord({
+    email,
+    role = "viewer",
+    displayName = "",
+    active = true,
+    projectIds = [],
+  }) {
+    const nowIso = new Date().toISOString();
+    const normalizedRole = normalizeAuthRole(role, "viewer");
+    return {
+      id: randomUUID(),
+      email: normalizeAuthEmail(email),
+      displayName: normalizeText(displayName, email),
+      role: normalizedRole,
+      active: active !== false,
+      projectIds: normalizedRole === "superadmin"
+        ? ["*"]
+        : normalizeProjectIdsForUser(projectIds, { allowWildcard: false }),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+  }
+
+  function createSessionToken() {
+    return createHash("sha256")
+      .update(`${randomUUID()}|${Date.now()}|${randomBytes(32).toString("hex")}`)
+      .digest("hex");
+  }
+
+  function pruneExpiredSessions() {
+    if (sessions.size === 0) {
       return;
     }
 
-    await this.sheets.spreadsheets.batchUpdate({
-      spreadsheetId: this.spreadsheetId,
-      requestBody: {
-        requests: missingTitles.map((title) => ({
-          addSheet: {
-            properties: { title },
-          },
-        })),
+    const now = Date.now();
+    for (const [token, session] of sessions.entries()) {
+      if (!session || session.expiresAt <= now) {
+        sessions.delete(token);
+      }
+    }
+  }
+
+  function getUserByEmail(email) {
+    const normalized = normalizeAuthEmail(email);
+    if (!normalized) {
+      return null;
+    }
+    return store.users.find((user) => user.email === normalized) || null;
+  }
+
+  async function ensureSuperAdminUser(existingUser, displayNameInput) {
+    const displayName = normalizeText(displayNameInput, "Superadmin");
+
+    if (existingUser) {
+      existingUser.role = "superadmin";
+      existingUser.active = true;
+      existingUser.displayName = displayName;
+      existingUser.projectIds = ["*"];
+      existingUser.updatedAt = new Date().toISOString();
+      await persistUsersStore();
+      return existingUser;
+    }
+
+    const createdUser = createUserRecord({
+      email: superAdminEmail,
+      role: "superadmin",
+      displayName,
+      active: true,
+      projectIds: ["*"],
+    });
+    store.users.push(createdUser);
+    await persistUsersStore();
+    return createdUser;
+  }
+
+  function toPublicUser(user, options = {}) {
+    const role = normalizeAuthRole(user?.role, "viewer");
+    const profileImageUrl = normalizeProfileImageUrl(options.profileImageUrl || "");
+    return {
+      id: normalizeIdentifier(user?.id, ""),
+      email: normalizeAuthEmail(user?.email),
+      displayName: normalizeText(user?.displayName, normalizeAuthEmail(user?.email)),
+      role,
+      active: user?.active !== false,
+      projectIds: role === "superadmin"
+        ? ["*"]
+        : normalizeProjectIdsForUser(user?.projectIds, { allowWildcard: false }),
+      profileImageUrl,
+      createdAt: normalizeIsoString(user?.createdAt || Date.now()),
+      updatedAt: normalizeIsoString(user?.updatedAt || Date.now()),
+    };
+  }
+
+  function normalizeProfileImageUrl(value) {
+    const raw = String(value || "").trim();
+    if (!raw) {
+      return "";
+    }
+
+    try {
+      const url = new URL(raw);
+      if (!["https:", "http:"].includes(url.protocol)) {
+        return "";
+      }
+      return url.toString();
+    } catch {
+      return "";
+    }
+  }
+
+  function userHasRole(actualRole, requiredRole) {
+    const actual = normalizeAuthRole(actualRole, "viewer");
+    const required = normalizeAuthRole(requiredRole, "viewer");
+    return Number(roleRank[actual] || 0) >= Number(roleRank[required] || 0);
+  }
+
+  function normalizeAuthRole(value, fallbackRole) {
+    const role = String(value || "").trim().toLowerCase();
+    return roleRank[role] ? role : fallbackRole;
+  }
+
+  function normalizeAuthEmail(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function normalizeProjectIdsForUser(projectIdsInput, { allowWildcard = false } = {}) {
+    const normalized = normalizeProjectIdsInput(projectIdsInput, { allowWildcard });
+    if (allowWildcard && normalized.includes("*")) {
+      return ["*"];
+    }
+    return normalized;
+  }
+
+  function userCanAccessAnyProject(user) {
+    const role = normalizeAuthRole(user?.role, "viewer");
+    if (role === "superadmin") {
+      return true;
+    }
+    const projectIds = normalizeProjectIdsForUser(user?.projectIds, { allowWildcard: true });
+    if (projectIds.includes("*")) {
+      return true;
+    }
+    return projectIds.length > 0;
+  }
+
+  async function persistSessionStore(session) {
+    const externalStore = getExternalSessionStore();
+    if (!externalStore) {
+      return;
+    }
+    await externalStore.persistAccessSession({
+      tokenHash: hashAccessSessionToken(session.token),
+      email: normalizeAuthEmail(session.email),
+      expiresAt: normalizeIsoString(session.expiresAt),
+      profileImageUrl: normalizeProfileImageUrl(session.profileImageUrl || ""),
+    });
+  }
+
+  async function loadSessionFromStore(token) {
+    const externalStore = getExternalSessionStore();
+    if (!externalStore) {
+      return null;
+    }
+    const session = await externalStore.loadAccessSession(hashAccessSessionToken(token));
+    if (!session?.email || !session?.expiresAt) {
+      return null;
+    }
+    const expiresAt = new Date(session.expiresAt).getTime();
+    if (!Number.isFinite(expiresAt)) {
+      return null;
+    }
+    return {
+      token,
+      email: normalizeAuthEmail(session.email),
+      expiresAt,
+      profileImageUrl: normalizeProfileImageUrl(session.profileImageUrl || ""),
+    };
+  }
+
+  async function deleteSessionFromStore(token) {
+    const externalStore = getExternalSessionStore();
+    if (!externalStore) {
+      return;
+    }
+    await externalStore.deleteAccessSession(hashAccessSessionToken(token));
+  }
+
+  async function persistUsersStore() {
+    if (!canPersistSuperAdminState()) {
+      throw new Error("Debe existir al menos un superadmin activo.");
+    }
+
+    const externalStore = getExternalUsersStore();
+    if (externalStore) {
+      try {
+        await externalStore.persistAccessUsers({
+          users: store.users.map((user) => ({
+            id: normalizeIdentifier(user.id, randomUUID()),
+            email: normalizeAuthEmail(user.email),
+            displayName: normalizeText(user.displayName, normalizeAuthEmail(user.email)),
+            role: normalizeAuthRole(user.role, "viewer"),
+            active: user.active !== false,
+            projectIds: normalizeProjectIdsForUser(
+              user.projectIds,
+              { allowWildcard: normalizeAuthRole(user.role, "viewer") === "superadmin" },
+            ),
+            createdAt: normalizeIsoString(user.createdAt || Date.now()),
+            updatedAt: normalizeIsoString(user.updatedAt || Date.now()),
+          })),
+        });
+        lastUsersSyncAt = Date.now();
+        return;
+      } catch (error) {
+        if (isAccessUsersBridgeActionUnsupported(error)) {
+          disableExternalUsersStoreForSession(error);
+          writeStoreFile(store);
+          return;
+        }
+        throw error;
+      }
+    }
+
+    writeStoreFile(store);
+  }
+
+  async function ensureUsersStoreSynchronized(force = false) {
+    const externalStore = getExternalUsersStore();
+    if (!externalStore) {
+      return;
+    }
+
+    const now = Date.now();
+    if (!force && now - lastUsersSyncAt < usersSyncMs) {
+      return;
+    }
+
+    let payload;
+    try {
+      payload = await externalStore.loadAccessUsers();
+    } catch (error) {
+      if (isAccessUsersBridgeActionUnsupported(error)) {
+        disableExternalUsersStoreForSession(error);
+        writeStoreFile(store);
+        return;
+      }
+      throw error;
+    }
+    const incomingUsers = Array.isArray(payload?.users) ? payload.users : [];
+    store.users = incomingUsers
+      .map((user) => sanitizeStoredUser(user))
+      .filter(Boolean);
+
+    if (!canPersistSuperAdminState()) {
+      const existing = getUserByEmail(superAdminEmail);
+      const createdOrUpdated = createUserRecord({
+        email: superAdminEmail,
+        role: "superadmin",
+        displayName: existing?.displayName || "Superadmin",
+        active: true,
+      });
+
+      if (existing) {
+        existing.role = "superadmin";
+        existing.active = true;
+        existing.projectIds = ["*"];
+        existing.updatedAt = new Date().toISOString();
+        existing.displayName = normalizeText(existing.displayName, createdOrUpdated.displayName);
+      } else {
+        store.users.push(createdOrUpdated);
+      }
+
+      try {
+        await externalStore.persistAccessUsers({
+          users: store.users,
+        });
+      } catch (error) {
+        if (isAccessUsersBridgeActionUnsupported(error)) {
+          disableExternalUsersStoreForSession(error);
+          writeStoreFile(store);
+          return;
+        }
+        throw error;
+      }
+    }
+
+    lastUsersSyncAt = Date.now();
+  }
+
+  function getExternalUsersStore() {
+    if (disableExternalUsersStore) {
+      return null;
+    }
+
+    try {
+      const provider = typeof options.getExternalStore === "function"
+        ? options.getExternalStore
+        : null;
+      const externalStore = provider ? provider() : null;
+      if (
+        !externalStore
+        || typeof externalStore.loadAccessUsers !== "function"
+        || typeof externalStore.persistAccessUsers !== "function"
+      ) {
+        return null;
+      }
+      return externalStore;
+    } catch {
+      return null;
+    }
+  }
+
+  function getExternalSessionStore() {
+    try {
+      const provider = typeof options.getExternalStore === "function"
+        ? options.getExternalStore
+        : null;
+      const externalStore = provider ? provider() : null;
+      if (
+        !externalStore
+        || typeof externalStore.persistAccessSession !== "function"
+        || typeof externalStore.loadAccessSession !== "function"
+        || typeof externalStore.deleteAccessSession !== "function"
+      ) {
+        return null;
+      }
+      return externalStore;
+    } catch {
+      return null;
+    }
+  }
+
+  function canPersistSuperAdminState(targetEmail = "", nextRole = "", nextActive = null) {
+    const normalizedTarget = normalizeAuthEmail(targetEmail);
+    const superAdminCount = store.users.reduce((total, user) => {
+      let role = user.role;
+      let active = user.active;
+
+      if (normalizedTarget && user.email === normalizedTarget) {
+        if (nextRole) {
+          role = normalizeAuthRole(nextRole, "viewer");
+        }
+        if (nextActive !== null) {
+          active = Boolean(nextActive);
+        }
+      }
+
+      return role === "superadmin" && active ? total + 1 : total;
+    }, 0);
+
+    return superAdminCount > 0;
+  }
+
+  function isAccessUsersBridgeActionUnsupported(error) {
+    const message = String(error instanceof Error ? error.message : error || "")
+      .trim()
+      .toLowerCase();
+    if (!message) {
+      return false;
+    }
+
+    const unsupportedMarker = message.includes("action no soportado")
+      || message.includes("action not supported");
+    if (!unsupportedMarker) {
+      return false;
+    }
+
+    return message.includes("loadaccessusers")
+      || message.includes("persistaccessusers")
+      || (message.includes("loadstate") && message.includes("persiststate"));
+  }
+
+  function disableExternalUsersStoreForSession(error) {
+    disableExternalUsersStore = true;
+    const detail = String(error instanceof Error ? error.message : error || "").trim();
+    if (!detail || detail === externalUsersStoreDisabledReason) {
+      return;
+    }
+
+    externalUsersStoreDisabledReason = detail;
+    console.warn(
+      `[access-control] Se desactivo sync externo de usuarios para esta sesion: ${detail}`,
+    );
+  }
+
+  function writeStoreFile(value) {
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(value, null, 2),
+      "utf8",
+    );
+  }
+}
+
+async function verifyGoogleIdToken(idToken, expectedClientId) {
+  try {
+    const endpoint = new URL("https://oauth2.googleapis.com/tokeninfo");
+    endpoint.searchParams.set("id_token", String(idToken || "").trim());
+
+    const response = await fetch(endpoint.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
       },
     });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: "No se pudo validar tu sesion de Google.",
+      };
+    }
+
+    const payload = await response.json();
+    const audience = String(payload?.aud || "").trim();
+    if (expectedClientId && audience !== expectedClientId) {
+      return {
+        ok: false,
+        error: "Token de Google no valido para este aplicativo.",
+      };
+    }
+
+    const email = String(payload?.email || "").trim().toLowerCase();
+    if (!email) {
+      return {
+        ok: false,
+        error: "Google no devolvio un correo valido.",
+      };
+    }
+
+    return {
+      ok: true,
+      payload,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: "No se pudo completar la validacion con Google.",
+    };
   }
 }
 
 storage = createStorageAdapter();
-
-function buildProjectSummaryRows(projects) {
-  return [
-    [
-      "projectId",
-      "name",
-      "updatedAt",
-      "rows",
-      "auditEntries",
-      "snapshots",
-      "grandTotal",
-    ],
-    ...projects.map((project) => {
-      const summary = summarizeProject(project);
-      return [
-        project.id,
-        project.name,
-        project.updatedAt,
-        String(project.rows.length),
-        String(project.auditEntries.length),
-        String(project.snapshots.length),
-        summary.grandTotal.toFixed(2),
-      ];
-    }),
-  ];
-}
-
-function summarizeProject(project) {
-  const rows = Array.isArray(project?.rows) ? project.rows : [];
-  const grandTotal = rows.reduce((sum, row, index) => {
-    return row.level === 0 ? sum + getRowPartialAtIndex(rows, index) : sum;
-  }, 0);
-
-  return { grandTotal };
-}
-
-function getRowPartialAtIndex(rows, rowIndex) {
-  const row = rows[rowIndex];
-  if (!row) {
-    return 0;
-  }
-
-  if (!rowHasChildren(rows, rowIndex)) {
-    return getLeafRowPartial(row);
-  }
-
-  const branchEnd = getBranchEnd(rows, rowIndex);
-  let subtotal = 0;
-
-  for (let cursor = rowIndex + 1; cursor <= branchEnd; cursor += 1) {
-    if (!rowHasChildren(rows, cursor)) {
-      subtotal += getLeafRowPartial(rows[cursor]);
-    }
-  }
-
-  return subtotal;
-}
-
-function rowHasChildren(rows, index) {
-  return index < rows.length - 1 && Number(rows[index + 1]?.level || 0) > Number(rows[index]?.level || 0);
-}
-
-function getBranchEnd(rows, index) {
-  const currentLevel = Number(rows[index]?.level || 0);
-  let cursor = index + 1;
-
-  while (cursor < rows.length && Number(rows[cursor]?.level || 0) > currentLevel) {
-    cursor += 1;
-  }
-
-  return cursor - 1;
-}
-
-function getLeafRowPartial(row) {
-  const costo = parseDecimal(row?.costo);
-  const metradoTradicional = parseDecimal(row?.metradoTradicional ?? row?.metrado);
-  const metradoBim = parseDecimal(row?.metradoBim);
-  return costo * (metradoTradicional + metradoBim);
-}
 
 function parseDecimal(value) {
   if (value === null || value === undefined || value === "") {
@@ -1634,84 +2717,6 @@ function parseDecimal(value) {
   const normalized = String(value).replace(/\s+/g, "").replace(",", ".");
   const numeric = Number.parseFloat(normalized);
   return Number.isFinite(numeric) ? numeric : 0;
-}
-
-function joinChunkedStateRows(rows) {
-  if (!Array.isArray(rows) || rows.length <= 1) {
-    return "";
-  }
-
-  return rows
-    .slice(1)
-    .map((row) => ({
-      index: Number.parseInt(row[0], 10) || 0,
-      chunk: row[1] || "",
-    }))
-    .sort((left, right) => left.index - right.index)
-    .map((entry) => entry.chunk)
-    .join("");
-}
-
-function chunkText(value, chunkSize) {
-  const source = String(value || "");
-  if (!source) {
-    return [""];
-  }
-
-  const chunks = [];
-  for (let cursor = 0; cursor < source.length; cursor += chunkSize) {
-    chunks.push(source.slice(cursor, cursor + chunkSize));
-  }
-  return chunks;
-}
-
-function tryParseJson(value) {
-  if (!value) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-function readInlineServiceAccountCredentials() {
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    return null;
-  }
-
-  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-  if (typeof credentials.private_key === "string") {
-    credentials.private_key = credentials.private_key.replace(/\\n/g, "\n");
-  }
-
-  return credentials;
-}
-
-function readSavedGoogleSheetsConfig() {
-  try {
-    const raw = fs.readFileSync(googleSheetsConfigPath, "utf8");
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeSavedGoogleSheetsConfig(value) {
-  fs.writeFileSync(
-    googleSheetsConfigPath,
-    JSON.stringify(value, null, 2),
-    "utf8",
-  );
-}
-
-function getSpreadsheetUrl(spreadsheetId) {
-  return spreadsheetId
-    ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`
-    : null;
 }
 
 function groupRowsByKey(rows, key) {
@@ -1837,7 +2842,7 @@ function splitSqlStatements(sqlText) {
 
 function isIgnorableMySqlSchemaError(error) {
   const code = Number(error?.errno || 0);
-  return code === 1050 || code === 1061 || code === 1826;
+  return code === 1050 || code === 1060 || code === 1061 || code === 1826;
 }
 
 function normalizeIncomingState(payload) {
@@ -1850,6 +2855,171 @@ function normalizeIncomingState(payload) {
     : (projects[0]?.id || null);
 
   return { currentProjectId, projects };
+}
+
+function normalizeProjectIdsInput(projectIdsInput, { allowWildcard = true } = {}) {
+  const rawValues = [];
+  if (Array.isArray(projectIdsInput)) {
+    rawValues.push(...projectIdsInput);
+  } else if (typeof projectIdsInput === "string") {
+    const trimmed = projectIdsInput.trim();
+    if (trimmed) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          rawValues.push(...parsed);
+        } else {
+          rawValues.push(...trimmed.split(/[;,]/g));
+        }
+      } catch {
+        rawValues.push(...trimmed.split(/[;,]/g));
+      }
+    }
+  }
+
+  const unique = [];
+  const seen = new Set();
+  rawValues.forEach((value) => {
+    const normalized = normalizeIdentifier(value, "");
+    if (!normalized) {
+      return;
+    }
+    if (!allowWildcard && normalized === "*") {
+      return;
+    }
+    if (seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    unique.push(normalized);
+  });
+  return unique;
+}
+
+function userCanAccessAllProjects(user) {
+  const role = String(user?.role || "").trim().toLowerCase();
+  if (role === "superadmin") {
+    return true;
+  }
+  return normalizeProjectIdsInput(user?.projectIds, { allowWildcard: true }).includes("*");
+}
+
+function userProjectScopeSet(user) {
+  if (userCanAccessAllProjects(user)) {
+    return null;
+  }
+  return new Set(normalizeProjectIdsInput(user?.projectIds, { allowWildcard: false }));
+}
+
+function userCanAccessProject(user, projectIdInput) {
+  const projectId = normalizeIdentifier(projectIdInput, "");
+  if (!projectId) {
+    return false;
+  }
+  if (userCanAccessAllProjects(user)) {
+    return true;
+  }
+  const scope = userProjectScopeSet(user);
+  return Boolean(scope && scope.has(projectId));
+}
+
+function filterStateByUserProjects(statePayload, user) {
+  const normalizedState = normalizeIncomingState(statePayload);
+  if (userCanAccessAllProjects(user)) {
+    return normalizedState;
+  }
+
+  const scope = userProjectScopeSet(user);
+  const projects = normalizedState.projects.filter((project) => scope && scope.has(project.id));
+  const currentProjectId = projects.some((project) => project.id === normalizedState.currentProjectId)
+    ? normalizedState.currentProjectId
+    : (projects[0]?.id || null);
+
+  return {
+    currentProjectId,
+    projects,
+  };
+}
+
+function mergeStateByUserProjects(currentStatePayload, incomingStatePayload, user) {
+  const incomingState = normalizeIncomingState(incomingStatePayload);
+  if (userCanAccessAllProjects(user)) {
+    return {
+      ok: true,
+      status: 200,
+      state: incomingState,
+    };
+  }
+
+  const scope = userProjectScopeSet(user);
+  if (!scope || scope.size === 0) {
+    return {
+      ok: false,
+      status: 403,
+      error: "No tienes proyectos asignados para editar.",
+    };
+  }
+
+  const currentState = normalizeIncomingState(currentStatePayload);
+  const incomingById = new Map(incomingState.projects.map((project) => [project.id, project]));
+  const currentById = new Map(currentState.projects.map((project) => [project.id, project]));
+
+  for (const incomingProject of incomingState.projects) {
+    if (!scope.has(incomingProject.id)) {
+      return {
+        ok: false,
+        status: 403,
+        error: `No puedes guardar cambios en el proyecto ${incomingProject.id}.`,
+      };
+    }
+    if (!currentById.has(incomingProject.id)) {
+      return {
+        ok: false,
+        status: 403,
+        error: "No puedes crear proyectos nuevos con tu perfil actual.",
+      };
+    }
+  }
+
+  const mergedProjects = currentState.projects.map((project) => {
+    if (!scope.has(project.id)) {
+      return project;
+    }
+    return incomingById.get(project.id) || project;
+  });
+
+  const requestedCurrentProjectId = normalizeIdentifier(incomingState.currentProjectId, "");
+  const currentProjectId = (
+    requestedCurrentProjectId
+    && userCanAccessProject(user, requestedCurrentProjectId)
+    && mergedProjects.some((project) => project.id === requestedCurrentProjectId)
+  )
+    ? requestedCurrentProjectId
+    : (
+      mergedProjects.some((project) => project.id === currentState.currentProjectId)
+        ? currentState.currentProjectId
+        : (mergedProjects.find((project) => scope.has(project.id))?.id || null)
+    );
+
+  return {
+    ok: true,
+    status: 200,
+    state: {
+      currentProjectId,
+      projects: mergedProjects,
+    },
+  };
+}
+
+function buildProjectAccessOptions(projectsInput) {
+  const projects = Array.isArray(projectsInput) ? projectsInput : [];
+  return projects
+    .map((project) => ({
+      id: normalizeIdentifier(project?.id, ""),
+      name: normalizeText(project?.name, "Proyecto"),
+    }))
+    .filter((project) => project.id)
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function normalizeIncomingRevitExport(payload) {
@@ -1892,7 +3062,7 @@ function normalizeIncomingRevitExportRow(row) {
     familia: normalizeText(row?.familia || row?.family, ""),
     tipo: normalizeText(row?.tipo || row?.type, ""),
     codigoPartida: normalizeText(row?.codigoPartida || row?.codificacion || row?.partida, ""),
-    descripcion: normalizeText(row?.descripcion || row?.description, ""),
+    descripcion: normalizeDescriptionText(row?.descripcion || row?.description),
     unidad: normalizeText(row?.unidad || row?.unit, ""),
     cantidad: parseDecimal(row?.cantidad ?? row?.quantity ?? row?.metradoBim ?? row?.metrado ?? 0),
     parametrosJson: normalizeJsonObject(row?.parametros ?? row?.parameters),
@@ -1915,6 +3085,75 @@ function normalizeIncomingProject(project, index) {
   };
 }
 
+function buildRevitImportStateFromState(statePayload, searchParams = new URLSearchParams()) {
+  const projects = Array.isArray(statePayload?.projects) ? statePayload.projects : [];
+  const requestedProjectUid = normalizeIdentifier(
+    searchParams.get("projectId") || searchParams.get("projectUid"),
+    "",
+  );
+  const projectUid = resolveExistingProjectUid(
+    projects.map((project) => ({
+      project_uid: project.id,
+    })),
+    requestedProjectUid || statePayload?.currentProjectId,
+  );
+  const project = projects.find((candidate) => candidate.id === projectUid) || projects[0] || null;
+  if (!project) {
+    return {
+      currentProjectId: null,
+      projectId: null,
+      projectName: "",
+      project: null,
+      rows: [],
+    };
+  }
+
+  const rows = addCodigoPartidaToRows(Array.isArray(project.rows) ? project.rows : []);
+  const compactProject = {
+    id: project.id,
+    name: project.name || "",
+    rows,
+  };
+
+  return {
+    currentProjectId: compactProject.id,
+    projectId: compactProject.id,
+    projectName: compactProject.name,
+    project: compactProject,
+    rows,
+  };
+}
+
+function resolveExistingProjectUid(projects, projectUid) {
+  const normalized = normalizeIdentifier(projectUid, "");
+  if (!normalized) {
+    return "";
+  }
+
+  const project = projects.find((candidate) => (
+    String(candidate.project_uid || candidate.id || "").trim() === normalized
+  ));
+  return project
+    ? String(project.project_uid || project.id || "").trim()
+    : "";
+}
+
+function addCodigoPartidaToRows(rows) {
+  const counters = [];
+
+  return rows.map((row) => {
+    const level = Math.max(0, Number.parseInt(row.level || 0, 10) || 0);
+    counters[level] = (counters[level] || 0) + 1;
+    counters.length = level + 1;
+
+    return {
+      ...row,
+      level,
+      codigoPartida: counters.join("."),
+    };
+  });
+}
+
 function normalizeIdentifier(value, fallback) {
   const text = String(value || "").trim();
   return text || fallback;
@@ -1923,6 +3162,43 @@ function normalizeIdentifier(value, fallback) {
 function normalizeText(value, fallback) {
   const text = String(value || "").trim().replace(/\s+/g, " ");
   return text || fallback;
+}
+
+function normalizeDescriptionText(value, fallback = "") {
+  const text = repairKnownEncodingArtifacts(String(value || "").trim().replace(/\s+/g, " "));
+  return text || fallback;
+}
+
+function repairKnownEncodingArtifacts(value) {
+  const replacement = "\uFFFD";
+  return String(value || "")
+    .replaceAll(`HABILITACI${replacement}N`, "HABILITACI\u00D3N")
+    .replaceAll(`COLOCACI${replacement}N`, "COLOCACI\u00D3N")
+    .replaceAll(`INSTALACI${replacement}N`, "INSTALACI\u00D3N")
+    .replaceAll(`CIMENTACI${replacement}N`, "CIMENTACI\u00D3N")
+    .replaceAll(`ASF${replacement}LTICA`, "ASF\u00C1LTICA")
+    .replaceAll(`S${replacement}TANO`, "S\u00D3TANO")
+    .replaceAll(`MOVILIZACI${replacement}N`, "MOVILIZACI\u00D3N")
+    .replaceAll(`DESMOVILIZACI${replacement}N`, "DESMOVILIZACI\u00D3N")
+    .replaceAll(`ALBA${replacement}ILER${replacement}A`, "ALBA\u00D1ILER\u00CDA")
+    .replaceAll(`ALBA${replacement}ILERIA`, "ALBA\u00D1ILERIA")
+    .replaceAll(`GRADER${replacement}AS`, "GRADER\u00CDAS")
+    .replaceAll(`PERIM${replacement}TRICA`, "PERIM\u00C9TRICA")
+    .replaceAll(`CONTRACCI${replacement}N`, "CONTRACCI\u00D3N")
+    .replaceAll(`PA${replacement}OS`, "PA\u00D1OS")
+    .replaceAll(`PASES EN MURO ANCLADO ${replacement} 6"`, "PASES EN MURO ANCLADO \u00D8 6\"")
+    .replaceAll(`PA${replacement}ETEO`, "PA\u00D1ETEO")
+    .replaceAll(`PESTA${replacement}AS`, "PESTA\u00D1AS")
+    .replaceAll(`M${replacement}NIMO`, "M\u00CDNIMO")
+    .replaceAll(`EXCAVACI${replacement}N`, "EXCAVACI\u00D3N");
+}
+
+function normalizeReglaMetrado(tipoMetrado, value) {
+  if (String(tipoMetrado || "").trim().toLowerCase() !== "revit") {
+    return "";
+  }
+
+  return String(value || "").trim() === "Encofrado" ? "Encofrado" : "";
 }
 
 function normalizeIsoString(value) {
@@ -1965,6 +3241,21 @@ function parseJsonArray(value) {
   }
 }
 
+function parseJsonObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeNullableInteger(value) {
   if (value === null || value === undefined || value === "") {
     return null;
@@ -1979,6 +3270,116 @@ function normalizeJsonObject(value) {
     return null;
   }
   return value;
+}
+
+function parseBooleanEnv(value, fallback) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "n", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function readBearerToken(request) {
+  const authHeader = String(request.headers.authorization || "").trim();
+  const bearerPrefix = "Bearer ";
+  if (!authHeader.startsWith(bearerPrefix)) {
+    return "";
+  }
+
+  return authHeader.slice(bearerPrefix.length).trim();
+}
+
+function readRequestSessionToken(request) {
+  return readBearerToken(request) || readCookieValue(request, webSessionCookieName);
+}
+
+function hashAccessSessionToken(token) {
+  return createHash("sha256")
+    .update(String(token || "").trim())
+    .digest("hex");
+}
+
+function readCookieValue(request, name) {
+  const cookieHeader = String(request.headers.cookie || "");
+  if (!cookieHeader) {
+    return "";
+  }
+  const target = `${encodeURIComponent(name)}=`;
+  const parts = cookieHeader.split(";").map((part) => part.trim());
+  const match = parts.find((part) => part.startsWith(target));
+  if (!match) {
+    return "";
+  }
+  return decodeURIComponent(match.slice(target.length));
+}
+
+function writeSessionCookie(response, token, expiresAt) {
+  const expires = new Date(expiresAt || Date.now()).toUTCString();
+  response.setHeader("Set-Cookie", [
+    `${encodeURIComponent(webSessionCookieName)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Expires=${expires}`,
+  ]);
+}
+
+function clearSessionCookie(response) {
+  response.setHeader("Set-Cookie", [
+    `${encodeURIComponent(webSessionCookieName)}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+  ]);
+}
+
+function buildWebAuthSession(user, publicSettings, expiresAt = "") {
+  const accessUser = user || null;
+  const role = accessUser ? normalizePublicRole(accessUser.role) : "";
+  return {
+    enabled: Boolean(publicSettings?.enabled),
+    configured: Boolean(publicSettings?.googleClientId),
+    required: Boolean(publicSettings?.enabled),
+    authenticated: Boolean(accessUser),
+    clientId: String(publicSettings?.googleClientId || ""),
+    allowedDomains: [],
+    userId: accessUser?.id || "",
+    userName: accessUser?.displayName || accessUser?.email || "",
+    userEmail: accessUser?.email || "",
+    pictureUrl: accessUser?.profileImageUrl || "",
+    hostedDomain: "",
+    expiresAt: expiresAt ? normalizeIsoString(expiresAt) : "",
+    role,
+    projectIds: Array.isArray(accessUser?.projectIds) ? accessUser.projectIds : [],
+  };
+}
+
+function normalizePublicRole(value) {
+  const role = String(value || "").trim().toLowerCase();
+  return ["viewer", "editor", "admin", "superadmin"].includes(role) ? role : "";
+}
+
+function normalizeProfileImageUrlForStorage(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const url = new URL(raw);
+    return ["http:", "https:"].includes(url.protocol) ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function isAuthorizedRevitIngestRequest(request) {
+  if (!revitIngestApiKey) {
+    return false;
+  }
+
+  const providedApiKey = readIncomingApiKey(request);
+  return Boolean(providedApiKey && providedApiKey === revitIngestApiKey);
 }
 
 function readIncomingApiKey(request) {
@@ -2028,12 +3429,13 @@ async function readJsonBody(request) {
 }
 
 async function serveStaticAsset(pathname, response, method) {
+  const staticRoot = fs.existsSync(path.join(distDir, "index.html")) ? distDir : __dirname;
   const safePath = pathname === "/"
     ? "index.html"
     : path.normalize(decodeURIComponent(pathname).replace(/^\/+/, ""));
-  const absolutePath = path.resolve(__dirname, safePath);
+  let absolutePath = path.resolve(staticRoot, safePath);
 
-  if (!absolutePath.startsWith(__dirname)) {
+  if (!absolutePath.startsWith(staticRoot)) {
     respondPlain(response, 403, "Acceso denegado.");
     return;
   }
@@ -2042,8 +3444,15 @@ async function serveStaticAsset(pathname, response, method) {
   try {
     fileBuffer = await readFile(absolutePath);
   } catch {
-    respondPlain(response, 404, "No encontrado.");
-    return;
+    const acceptsHtmlFallback = method === "GET"
+      && !path.extname(safePath)
+      && fs.existsSync(path.join(staticRoot, "index.html"));
+    if (!acceptsHtmlFallback) {
+      respondPlain(response, 404, "No encontrado.");
+      return;
+    }
+    absolutePath = path.join(staticRoot, "index.html");
+    fileBuffer = await readFile(absolutePath);
   }
 
   response.writeHead(200, {

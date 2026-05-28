@@ -1,0 +1,18 @@
+:root {
+  --bg: #eef3f7;
+  --panel: #ffffff;
+  --panel-soft: #f7fafc;
+  --line: #d7dfe8;
+  --line-strong: #b5c3d3;
+  --text: #162536;
+  --muted: #5f7388;
+  --accent: #117e77;
+  --accent-strong: #0d635e;
+  --accent-soft: #dff4ef;
+  --danger: #b42318;
+  --danger-soft: #fde8e8;
+  --warning: #b45309;
+  --warning-soft: #fef3c7;
+  --info-soft: #e0f2fe;
+  --shadow: 0 18px 42px rgba(17, 33, 51, 0.08);
+}

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS `MTRD_Item` (
   `MTRD_Item_MetradoTradicional` DECIMAL(18,6) NOT NULL DEFAULT 0 COMMENT 'Metrado tradicional',
   `MTRD_Item_MetradoBim` DECIMAL(18,6) NOT NULL DEFAULT 0 COMMENT 'Metrado BIM',
   `MTRD_Item_TipoMetrado` VARCHAR(30) NOT NULL DEFAULT '' COMMENT 'Tipo de metrado',
+  `MTRD_Item_ReglaMetrado` VARCHAR(60) NOT NULL DEFAULT '' COMMENT 'Regla de metrado',
   `MTRD_Item_CreadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Fecha de creacion del item',
   `MTRD_Item_ActualizadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Fecha de actualizacion del item',
   PRIMARY KEY (`MTRD_Item_ID`),
@@ -121,6 +122,7 @@ CREATE TABLE IF NOT EXISTS `MTRD_SnapshotItem` (
   `MTRD_SnapshotItem_MetradoTradicional` DECIMAL(18,6) NOT NULL DEFAULT 0 COMMENT 'Metrado tradicional del item',
   `MTRD_SnapshotItem_MetradoBim` DECIMAL(18,6) NOT NULL DEFAULT 0 COMMENT 'Metrado BIM del item',
   `MTRD_SnapshotItem_TipoMetrado` VARCHAR(30) NOT NULL DEFAULT '' COMMENT 'Tipo de metrado del item',
+  `MTRD_SnapshotItem_ReglaMetrado` VARCHAR(60) NOT NULL DEFAULT '' COMMENT 'Regla de metrado del item',
   PRIMARY KEY (`MTRD_SnapshotItem_ID`),
   UNIQUE KEY `UQ_MTRD_SnapshotItem_Snapshot_Orden` (`MTRD_SnapshotItem_KEY_Snapshot`,`MTRD_SnapshotItem_Orden`),
   KEY `IX_MTRD_SnapshotItem_Snapshot_ItemUID` (`MTRD_SnapshotItem_KEY_Snapshot`,`MTRD_SnapshotItem_ItemUID`),
@@ -128,6 +130,14 @@ CREATE TABLE IF NOT EXISTS `MTRD_SnapshotItem` (
     FOREIGN KEY (`MTRD_SnapshotItem_KEY_Snapshot`) REFERENCES `MTRD_Snapshot` (`MTRD_Snapshot_ID`)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB COMMENT='Items congelados por snapshot';
+
+ALTER TABLE `MTRD_Item`
+  ADD COLUMN `MTRD_Item_ReglaMetrado` VARCHAR(60) NOT NULL DEFAULT '' COMMENT 'Regla de metrado'
+  AFTER `MTRD_Item_TipoMetrado`;
+
+ALTER TABLE `MTRD_SnapshotItem`
+  ADD COLUMN `MTRD_SnapshotItem_ReglaMetrado` VARCHAR(60) NOT NULL DEFAULT '' COMMENT 'Regla de metrado del item'
+  AFTER `MTRD_SnapshotItem_TipoMetrado`;
 
 CREATE TABLE IF NOT EXISTS `MTRD_RevitExport` (
   `MTRD_RevitExport_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna del lote de exportacion Revit',
@@ -221,3 +231,32 @@ CREATE TABLE IF NOT EXISTS `MTRD_AppMeta` (
   PRIMARY KEY (`MTRD_AppMeta_ID`),
   UNIQUE KEY `UQ_MTRD_AppMeta_Clave` (`MTRD_AppMeta_Clave`)
 ) ENGINE=InnoDB COMMENT='Metadatos globales de aplicacion';
+
+CREATE TABLE IF NOT EXISTS `MTRD_UsuarioAcceso` (
+  `MTRD_UsuarioAcceso_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna del usuario de acceso',
+  `MTRD_UsuarioAcceso_UID` CHAR(36) NOT NULL COMMENT 'UID estable del usuario de acceso',
+  `MTRD_UsuarioAcceso_Email` VARCHAR(180) NOT NULL COMMENT 'Correo Google autorizado',
+  `MTRD_UsuarioAcceso_Nombre` VARCHAR(180) NOT NULL DEFAULT '' COMMENT 'Nombre visible',
+  `MTRD_UsuarioAcceso_Rol` VARCHAR(30) NOT NULL DEFAULT 'viewer' COMMENT 'Rol viewer/editor/admin/superadmin',
+  `MTRD_UsuarioAcceso_Activo` TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Estado de acceso',
+  `MTRD_UsuarioAcceso_ProyectoIdsJson` JSON NOT NULL COMMENT 'Lista de proyectos autorizados o *',
+  `MTRD_UsuarioAcceso_CreadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Fecha de creacion',
+  `MTRD_UsuarioAcceso_ActualizadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Fecha de actualizacion',
+  PRIMARY KEY (`MTRD_UsuarioAcceso_ID`),
+  UNIQUE KEY `UQ_MTRD_UsuarioAcceso_UID` (`MTRD_UsuarioAcceso_UID`),
+  UNIQUE KEY `UQ_MTRD_UsuarioAcceso_Email` (`MTRD_UsuarioAcceso_Email`)
+) ENGINE=InnoDB COMMENT='Usuarios autorizados para MTR2';
+
+CREATE TABLE IF NOT EXISTS `MTRD_SesionAcceso` (
+  `MTRD_SesionAcceso_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna de sesion',
+  `MTRD_SesionAcceso_TokenHash` CHAR(64) NOT NULL COMMENT 'Hash SHA-256 del token de sesion',
+  `MTRD_SesionAcceso_Email` VARCHAR(180) NOT NULL COMMENT 'Correo autenticado',
+  `MTRD_SesionAcceso_ExpiraEn` DATETIME NOT NULL COMMENT 'Fecha de expiracion',
+  `MTRD_SesionAcceso_ProfileImageUrl` VARCHAR(500) NOT NULL DEFAULT '' COMMENT 'Foto Google',
+  `MTRD_SesionAcceso_CreadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Fecha de creacion',
+  `MTRD_SesionAcceso_ActualizadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Fecha de actualizacion',
+  PRIMARY KEY (`MTRD_SesionAcceso_ID`),
+  UNIQUE KEY `UQ_MTRD_SesionAcceso_TokenHash` (`MTRD_SesionAcceso_TokenHash`),
+  KEY `IX_MTRD_SesionAcceso_Email` (`MTRD_SesionAcceso_Email`),
+  KEY `IX_MTRD_SesionAcceso_ExpiraEn` (`MTRD_SesionAcceso_ExpiraEn`)
+) ENGINE=InnoDB COMMENT='Sesiones web de MTR2';
