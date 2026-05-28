@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS `MTRD_Proyecto` (
   `MTRD_Proyecto_Estado` TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Estado logico del proyecto',
   PRIMARY KEY (`MTRD_Proyecto_ID`),
   UNIQUE KEY `UQ_MTRD_Proyecto_UID` (`MTRD_Proyecto_UID`)
-) ENGINE=InnoDB COMMENT='Proyectos de Itemicostos';
+) ENGINE=InnoDB COMMENT='Proyectos de Quantiva';
 
 CREATE TABLE IF NOT EXISTS `MTRD_Item` (
   `MTRD_Item_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna del item',
@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS `MTRD_RevitExport` (
   `MTRD_RevitExport_FechaExportacion` DATETIME NOT NULL COMMENT 'Fecha de exportacion en origen',
   `MTRD_RevitExport_TotalElementos` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Cantidad de filas exportadas',
   `MTRD_RevitExport_TotalCantidad` DECIMAL(18,6) NOT NULL DEFAULT 0 COMMENT 'Suma total de cantidades exportadas',
-  `MTRD_RevitExport_TotalItemsVinculados` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Cantidad de items de Itemicostos vinculados',
+  `MTRD_RevitExport_TotalItemsVinculados` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Cantidad de items de Quantiva vinculados',
   `MTRD_RevitExport_OrigenIP` VARCHAR(45) NOT NULL DEFAULT '' COMMENT 'IP de origen del request',
   `MTRD_RevitExport_PayloadHash` CHAR(64) NOT NULL DEFAULT '' COMMENT 'Hash SHA-256 para trazabilidad del payload',
   `MTRD_RevitExport_CreadoEn` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Fecha de registro del lote',
@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS `MTRD_RevitExportItem` (
   `MTRD_RevitExportItem_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna del detalle exportado',
   `MTRD_RevitExportItem_KEY_Export` BIGINT UNSIGNED NOT NULL COMMENT 'FK al lote de exportacion Revit',
   `MTRD_RevitExportItem_KEY_Proyecto` BIGINT UNSIGNED NOT NULL COMMENT 'FK al proyecto destino',
-  `MTRD_RevitExportItem_KEY_Item` BIGINT UNSIGNED NULL COMMENT 'FK opcional al item vinculado en Itemicostos',
+  `MTRD_RevitExportItem_KEY_Item` BIGINT UNSIGNED NULL COMMENT 'FK opcional al item vinculado en Quantiva',
   `MTRD_RevitExportItem_ItemUID` CHAR(36) NOT NULL DEFAULT '' COMMENT 'UID del item vinculado en frontend',
   `MTRD_RevitExportItem_ElementId` BIGINT NULL COMMENT 'ElementId de Revit',
   `MTRD_RevitExportItem_ElementUniqueId` VARCHAR(120) NOT NULL DEFAULT '' COMMENT 'UniqueId de Revit',
@@ -198,9 +198,9 @@ CREATE TABLE IF NOT EXISTS `MTRD_RevitExportItem` (
 ) ENGINE=InnoDB COMMENT='Detalle de elementos y metrados exportados desde Revit';
 
 CREATE TABLE IF NOT EXISTS `MTRD_RevitVinculoItem` (
-  `MTRD_RevitVinculoItem_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna del vinculo Revit Itemicostos',
+  `MTRD_RevitVinculoItem_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna del vinculo Revit Quantiva',
   `MTRD_RevitVinculoItem_KEY_Proyecto` BIGINT UNSIGNED NOT NULL COMMENT 'FK al proyecto',
-  `MTRD_RevitVinculoItem_KEY_Item` BIGINT UNSIGNED NOT NULL COMMENT 'FK al item de Itemicostos',
+  `MTRD_RevitVinculoItem_KEY_Item` BIGINT UNSIGNED NOT NULL COMMENT 'FK al item de Quantiva',
   `MTRD_RevitVinculoItem_DocumentoUID` VARCHAR(120) NOT NULL DEFAULT '' COMMENT 'UID del documento Revit',
   `MTRD_RevitVinculoItem_ElementUniqueId` VARCHAR(120) NOT NULL COMMENT 'UniqueId del elemento Revit',
   `MTRD_RevitVinculoItem_ElementId` BIGINT NULL COMMENT 'ElementId de Revit',
@@ -221,7 +221,7 @@ CREATE TABLE IF NOT EXISTS `MTRD_RevitVinculoItem` (
   CONSTRAINT `FK_MTRD_RevitVinculoItem_UltimoExport`
     FOREIGN KEY (`MTRD_RevitVinculoItem_KEY_UltimoExport`) REFERENCES `MTRD_RevitExport` (`MTRD_RevitExport_ID`)
     ON DELETE SET NULL ON UPDATE CASCADE
-) ENGINE=InnoDB COMMENT='Vinculos entre elementos de Revit e items de Itemicostos';
+) ENGINE=InnoDB COMMENT='Vinculos entre elementos de Revit e items de Quantiva';
 
 CREATE TABLE IF NOT EXISTS `MTRD_AppMeta` (
   `MTRD_AppMeta_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna del metadato',
@@ -245,7 +245,7 @@ CREATE TABLE IF NOT EXISTS `MTRD_UsuarioAcceso` (
   PRIMARY KEY (`MTRD_UsuarioAcceso_ID`),
   UNIQUE KEY `UQ_MTRD_UsuarioAcceso_UID` (`MTRD_UsuarioAcceso_UID`),
   UNIQUE KEY `UQ_MTRD_UsuarioAcceso_Email` (`MTRD_UsuarioAcceso_Email`)
-) ENGINE=InnoDB COMMENT='Usuarios autorizados para MTR2';
+) ENGINE=InnoDB COMMENT='Usuarios autorizados para Quantiva';
 
 CREATE TABLE IF NOT EXISTS `MTRD_SesionAcceso` (
   `MTRD_SesionAcceso_ID` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'PK interna de sesion',
@@ -259,4 +259,4 @@ CREATE TABLE IF NOT EXISTS `MTRD_SesionAcceso` (
   UNIQUE KEY `UQ_MTRD_SesionAcceso_TokenHash` (`MTRD_SesionAcceso_TokenHash`),
   KEY `IX_MTRD_SesionAcceso_Email` (`MTRD_SesionAcceso_Email`),
   KEY `IX_MTRD_SesionAcceso_ExpiraEn` (`MTRD_SesionAcceso_ExpiraEn`)
-) ENGINE=InnoDB COMMENT='Sesiones web de MTR2';
+) ENGINE=InnoDB COMMENT='Sesiones web de Quantiva';

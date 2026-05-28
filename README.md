@@ -1,4 +1,4 @@
-# MTR2 - Itemizado y Costos
+# Quantiva - Itemizado y Costos
 
 Aplicativo web React + Vite + TypeScript para crear un itemizado jerarquico, editar presupuesto y sincronizar metrados BIM con Revit. La interfaz usa la estructura visual de ERP DECHINI WEB y el backend Node conserva los contratos MySQL/Revit existentes.
 
@@ -50,7 +50,7 @@ El acceso es por lista manual en `MTRD_UsuarioAcceso`. El superadmin inicial es 
 
 ## Hostear desde una PC de la oficina
 
-Para que otras PCs abran ITEMICOSTOS desde la maquina host:
+Para que otras PCs abran Quantiva desde la maquina host:
 
 1. En la PC host, usar en `.env`:
 
@@ -81,9 +81,9 @@ No se recomienda abrir MySQL directo a internet. Para acceso fuera de la oficina
 
 Esta carpeta trabaja junto con `../REVIT-MODEL-AUDITOR`:
 
-- `ITEMICOSTOS` / `MTR2` es la app web de itemizado, presupuesto, usuarios y persistencia MySQL.
+- `ITEMICOSTOS` / `Quantiva` es la app web de itemizado, presupuesto, usuarios y persistencia MySQL.
 - `REVIT-MODEL-AUDITOR` es el add-in de Revit que audita modelos, prepara codificacion y devuelve metrados BIM.
-- La ventana `Presupuesto BIM` del add-in incrusta `ITEMICOSTOS` mediante WebView2 apuntando a `web.baseUrl` en `itemicostos-metrado-export.settings.json`; por defecto es `http://127.0.0.1:5500/`.
+- La ventana `Presupuesto BIM` del add-in incrusta Quantiva mediante WebView2 apuntando a `web.baseUrl` en `itemicostos-metrado-export.settings.json`; por defecto es `http://127.0.0.1:5500/`.
 - El boton `Verificar codificaciones` del add-in compara las `CODIFICACIONxx` del modelo Revit contra `MTRD_Item_Codificacion` del proyecto activo.
 - El boton `Importar costos` del add-in, tanto en el ribbon como dentro de la pestana `Presupuesto`, lee el proyecto activo de esta app directamente por `GET /api/revit/import-state`; ya no requiere seleccionar un Excel para importar codigo, descripcion, unidad y costo hacia Revit.
 - El boton `Crear Tablas` del add-in tambien lee el proyecto activo por `GET /api/revit/import-state`; ya no requiere seleccionar un Excel para crear/actualizar tablas de planificacion por codificacion y nivel.
@@ -96,7 +96,7 @@ Contrato compartido entre ambos aplicativos:
 1. El proyecto se identifica con `project.id` en la app web y con `MTRD_Proyecto_UID` en MySQL.
 2. La partida se cruza por `codificacion` en la app web y `MTRD_Item_Codificacion` en MySQL.
 3. El valor BIM que vuelve desde Revit se guarda en `metradoBim` / `MTRD_Item_MetradoBim`.
-4. Para llevar costos y tablas desde Itemicostos hacia Revit, los comandos `Importar Costos` y `Crear Tablas` leen `GET /api/revit/import-state`, toman el proyecto activo y recorren sus `rows[]`.
+4. Para llevar costos y tablas desde Quantiva hacia Revit, los comandos `Importar Costos` y `Crear Tablas` leen `GET /api/revit/import-state`, toman el proyecto activo y recorren sus `rows[]`.
 5. Cada fila usada por esos comandos entrega `codigoPartida`, `codificacion`, `descripcion`, `unidad` y `costo`. `codigoPartida` se calcula en el backend con el mismo criterio visual de la grilla (`1`, `1.1`, `1.1.1`, etc.) y el add-in no lo deriva.
 6. `Importar Costos` escribe codigo, descripcion, unidad y costo en los parametros del nivel Revit coincidente. `Crear Tablas` crea/actualiza tablas de planificacion por codificacion y nivel usando la misma data.
 7. Para traer metrados desde Revit, el add-in lee parametros del modelo y envia el lote a `POST /api/revit/export`, cruzando cada fila por `MTRD_Item_Codificacion`.
@@ -129,7 +129,7 @@ Regla permanente: cualquier cambio en nombres de columnas, campos JSON, tablas `
 
 ## Recepcion de metrado Revit
 
-Este endpoint es el flujo activo de recepcion de metrados BIM desde el add-in. `Exportar Itemicostos` envia los metrados a esta API y el backend escribe en MySQL.
+Este endpoint es el flujo activo de recepcion de metrados BIM desde el add-in. `Exportar Quantiva` envia los metrados a esta API y el backend escribe en MySQL.
 
 Endpoint: `POST /api/revit/export`
 
@@ -162,4 +162,4 @@ Payload minimo:
 }
 ```
 
-Si `REVIT_INGEST_API_KEY` esta definido en `.env`, el add-in debe enviar el mismo valor en `web.ingestApiKey` para autorizar la carga. Si no hay llave, el endpoint usa la sesion de Itemicostos y permisos de proyecto.
+Si `REVIT_INGEST_API_KEY` esta definido en `.env`, el add-in debe enviar el mismo valor en `web.ingestApiKey` para autorizar la carga. Si no hay llave, el endpoint usa la sesion de Quantiva y permisos de proyecto.

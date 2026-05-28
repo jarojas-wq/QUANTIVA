@@ -49,9 +49,9 @@ export function LoginPage() {
     <div className="auth-screen">
       <div className="auth-card">
         <p className="eyebrow">DECHINI SUITE</p>
-        <h1>MTR2</h1>
+        <h1>Quantiva</h1>
         <p className="muted">
-          Ingresa con Google para trabajar con itemizados, costos y metrados BIM.
+          Ingresa con Google para trabajar con metrados, itemizados y costos BIM.
         </p>
         {loading && <p className="muted">Preparando sesion...</p>}
         {!loading && !session?.configured && (

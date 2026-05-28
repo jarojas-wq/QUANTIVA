@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getLegacyViewForPath, LEGACY_ROUTE_BY_VIEW } from "./legacy-routes";
 
 describe("legacy route mapping", () => {
-  it("maps public React routes to the preserved MTR2 views", () => {
+  it("maps public React routes to the preserved Quantiva views", () => {
     expect(getLegacyViewForPath("/itemizado")).toBe("itemizado");
     expect(getLegacyViewForPath("/presupuesto")).toBe("presupuesto");
     expect(getLegacyViewForPath("/control-bim")).toBe("control-bim");

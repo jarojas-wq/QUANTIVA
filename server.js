@@ -341,7 +341,7 @@ const server = http.createServer(async (request, response) => {
       if (!authorizedByApiKey && !userCanAccessProject(session.user, compact.project.id)) {
         respondJson(response, 403, {
           ok: false,
-          error: "No tienes acceso al proyecto activo de ITEMICOSTOS.",
+          error: "No tienes acceso al proyecto activo de Quantiva.",
         });
         return;
       }
@@ -363,7 +363,7 @@ const server = http.createServer(async (request, response) => {
 
       if (typeof storage.ingestRevitExport !== "function") {
         respondJson(response, 409, {
-          error: "La exportacion de Revit solo esta disponible con ITEMICOSTOS_STORAGE=mysql.",
+          error: "La exportacion de Revit solo esta disponible con Quantiva en MySQL.",
         });
         return;
       }
@@ -422,7 +422,7 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(port, host, async () => {
   const health = await storage.getHealth();
-  console.log(`Itemicostos listo en http://${host}:${port}`);
+  console.log(`Quantiva listo en http://${host}:${port}`);
   console.log(`Storage: ${storage.label}`);
   console.log(
     accessControl.isEnabled()
@@ -1960,7 +1960,7 @@ function createAccessControlManager(filePath, options = {}) {
           user: {
             email: "sistema@local",
             role: "superadmin",
-            displayName: "Sistema local",
+            displayName: "Quantiva local",
           },
         };
       }

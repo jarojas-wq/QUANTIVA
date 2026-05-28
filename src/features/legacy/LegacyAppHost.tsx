@@ -18,7 +18,7 @@ function loadLegacyScript() {
     script.defer = true;
     script.dataset.legacyApp = "mtr2";
     script.onload = () => resolve();
-    script.onerror = () => reject(new Error("No se pudo cargar el motor de MTR2."));
+    script.onerror = () => reject(new Error("No se pudo cargar el motor de Quantiva."));
     document.body.appendChild(script);
   });
   return legacyScriptPromise;
@@ -74,7 +74,7 @@ export function LegacyAppHost() {
   }, [location.pathname, navigate]);
 
   if (!markup) {
-    return <div className="page-state">Cargando MTR2...</div>;
+    return <div className="page-state">Cargando Quantiva...</div>;
   }
 
   return (

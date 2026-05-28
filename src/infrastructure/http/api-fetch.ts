@@ -14,7 +14,7 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
       ...options
     });
   } catch {
-    throw new Error("No se pudo conectar con MTR2. Verifica el servidor e intenta nuevamente.");
+    throw new Error("No se pudo conectar con Quantiva. Verifica el servidor e intenta nuevamente.");
   }
 
   const text = await response.text();
