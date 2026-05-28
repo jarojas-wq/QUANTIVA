@@ -102,6 +102,7 @@ const AUDIT_FILTER_CONFIGS = {
   cost: { label: "Costo/Metrados" },
 };
 const USER_ROLE_OPTIONS = ["viewer", "editor", "admin", "superadmin"];
+const USER_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const EXPORT_COLUMN_SCHEMAS = {
   rvt: [
     { key: "codificacion", header: "CODIFICACION", width: 22, type: "text" },
@@ -550,6 +551,9 @@ const usersState = {
   info: "",
   editingEmail: "",
   selectedProjectId: "",
+  addMembersMode: false,
+  memberEmailInput: "",
+  memberDrafts: [],
   loadedForToken: "",
   loaded: false,
 };
@@ -929,19 +933,43 @@ if (usersPanel) {
     if (action === "back-projects") {
       usersState.selectedProjectId = "";
       usersState.editingEmail = "";
+      resetUsersAddMembersState();
       usersState.error = "";
       usersState.info = "";
       renderUsersPanel();
       return;
     }
 
-    if (action === "new" || action === "new-member") {
+    if (action === "new") {
       usersState.editingEmail = "";
-      usersState.info = action === "new-member"
-        ? "Formulario listo para anadir un miembro al proyecto."
-        : "Formulario listo para nuevo usuario.";
+      usersState.info = "Formulario listo para nuevo usuario.";
       usersState.error = "";
       renderUsersPanel();
+      return;
+    }
+
+    if (action === "new-member") {
+      openUsersAddMembersFlow();
+      return;
+    }
+
+    if (action === "cancel-add-members") {
+      closeUsersAddMembersFlow();
+      return;
+    }
+
+    if (action === "process-member-emails") {
+      processUsersAddMemberEmails();
+      return;
+    }
+
+    if (action === "remove-member-draft") {
+      removeUsersMemberDraft(actionElement.dataset.draftId);
+      return;
+    }
+
+    if (action === "save-member-drafts") {
+      await saveUsersMemberDrafts();
       return;
     }
 
@@ -955,6 +983,14 @@ if (usersPanel) {
       const email = String(actionElement.dataset.userEmail || "").trim().toLowerCase();
       await removeUserFromSelectedProject(email);
     }
+  });
+
+  usersPanel.addEventListener("input", (event) => {
+    handleUsersDraftInputEvent(event);
+  });
+
+  usersPanel.addEventListener("change", (event) => {
+    handleUsersDraftInputEvent(event);
   });
 }
 
@@ -1772,6 +1808,7 @@ function resetUsersState() {
   usersState.info = "";
   usersState.editingEmail = "";
   usersState.selectedProjectId = "";
+  resetUsersAddMembersState();
   usersState.loadedForToken = "";
   usersState.loaded = false;
 }
@@ -1983,9 +2020,232 @@ function selectUsersProject(projectIdInput) {
 
   usersState.selectedProjectId = projectId;
   usersState.editingEmail = "";
+  resetUsersAddMembersState();
   usersState.error = "";
   usersState.info = "";
   renderUsersPanel();
+}
+
+function resetUsersAddMembersState() {
+  usersState.addMembersMode = false;
+  usersState.memberEmailInput = "";
+  usersState.memberDrafts = [];
+}
+
+function openUsersAddMembersFlow() {
+  if (!getUsersSelectedProject()) {
+    usersState.error = "Selecciona un proyecto antes de anadir miembros.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  usersState.addMembersMode = true;
+  usersState.editingEmail = "";
+  usersState.memberEmailInput = "";
+  usersState.memberDrafts = [];
+  usersState.error = "";
+  usersState.info = "";
+  renderUsersPanel();
+}
+
+function closeUsersAddMembersFlow() {
+  usersState.editingEmail = "";
+  resetUsersAddMembersState();
+  usersState.error = "";
+  usersState.info = "";
+  renderUsersPanel();
+}
+
+function isValidUsersEmail(emailInput) {
+  return USER_EMAIL_PATTERN.test(String(emailInput || "").trim().toLowerCase());
+}
+
+function parseUsersEmailList(emailInput) {
+  const rawValues = String(emailInput || "")
+    .split(/[\s,;]+/g)
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const emails = [];
+  const invalid = [];
+  const seen = new Set();
+
+  rawValues.forEach((email) => {
+    if (!isValidUsersEmail(email)) {
+      invalid.push(email);
+      return;
+    }
+    if (seen.has(email)) {
+      return;
+    }
+    seen.add(email);
+    emails.push(email);
+  });
+
+  return { emails, invalid };
+}
+
+function getCompanyFromUsersEmail(emailInput) {
+  const domain = String(emailInput || "").split("@")[1] || "";
+  const company = domain.split(".")[0] || "";
+  return company ? company.toUpperCase() : "";
+}
+
+function splitUsersDisplayName(displayNameInput, emailInput) {
+  const displayName = String(displayNameInput || "").trim();
+  if (!displayName) {
+    return {
+      firstName: "",
+      lastName: "",
+    };
+  }
+
+  const parts = displayName.split(/\s+/g).filter(Boolean);
+  if (parts.length <= 1) {
+    return {
+      firstName: parts[0] || "",
+      lastName: "",
+    };
+  }
+
+  return {
+    firstName: parts.slice(0, -1).join(" "),
+    lastName: parts.slice(-1).join(" "),
+  };
+}
+
+function getUsersDraftDisplayName(draft) {
+  return [draft?.firstName, draft?.lastName]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function createUsersMemberDraft(emailInput, existingUser = null) {
+  const email = String(emailInput || "").trim().toLowerCase();
+  const splitName = splitUsersDisplayName(existingUser?.displayName, email);
+  return {
+    id: `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    email,
+    firstName: splitName.firstName,
+    lastName: splitName.lastName,
+    company: getCompanyFromUsersEmail(email),
+    role: normalizeUserRole(existingUser?.role || "viewer"),
+    active: existingUser ? existingUser.active !== false : true,
+    existing: Boolean(existingUser),
+  };
+}
+
+function processUsersAddMemberEmails() {
+  const inputElement = usersPanel?.querySelector("[data-users-member-email-input]");
+  usersState.memberEmailInput = inputElement
+    ? String(inputElement.value || "")
+    : String(usersState.memberEmailInput || "");
+
+  const { emails, invalid } = parseUsersEmailList(usersState.memberEmailInput);
+  if (invalid.length > 0) {
+    usersState.error = `Revisa estos correos: ${invalid.slice(0, 3).join(", ")}${invalid.length > 3 ? "..." : ""}`;
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  if (emails.length === 0) {
+    usersState.error = "Ingresa al menos un correo valido.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const currentDraftEmails = new Set(usersState.memberDrafts.map((draft) => draft.email));
+  const nextDrafts = [];
+  emails.forEach((email) => {
+    if (currentDraftEmails.has(email)) {
+      return;
+    }
+    const existingUser = usersState.items.find((entry) => entry.email === email) || null;
+    nextDrafts.push(createUsersMemberDraft(email, existingUser));
+  });
+
+  if (nextDrafts.length === 0) {
+    usersState.error = "Esos correos ya estan en la lista de borradores.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  usersState.memberDrafts = [...usersState.memberDrafts, ...nextDrafts].slice(0, 100);
+  usersState.memberEmailInput = "";
+  usersState.error = "";
+  usersState.info = `${nextDrafts.length} correo${nextDrafts.length === 1 ? "" : "s"} listo${nextDrafts.length === 1 ? "" : "s"} para completar.`;
+  renderUsersPanel();
+}
+
+function removeUsersMemberDraft(draftIdInput) {
+  const draftId = String(draftIdInput || "");
+  usersState.memberDrafts = usersState.memberDrafts.filter((draft) => draft.id !== draftId);
+  usersState.error = "";
+  usersState.info = "";
+  renderUsersPanel();
+}
+
+function handleUsersDraftInputEvent(event) {
+  const emailInput = event.target.closest("[data-users-member-email-input]");
+  if (emailInput) {
+    usersState.memberEmailInput = String(emailInput.value || "");
+    return;
+  }
+
+  const fieldElement = event.target.closest("[data-users-draft-field]");
+  if (!fieldElement) {
+    return;
+  }
+
+  const row = fieldElement.closest("[data-users-draft-row]");
+  const draftId = String(row?.dataset.usersDraftRow || "");
+  const field = String(fieldElement.dataset.usersDraftField || "");
+  const draft = usersState.memberDrafts.find((entry) => entry.id === draftId);
+  if (!draft || !field) {
+    return;
+  }
+
+  if (field === "active") {
+    draft.active = Boolean(fieldElement.checked);
+    return;
+  }
+
+  if (field === "role") {
+    draft.role = normalizeUserRole(fieldElement.value);
+    return;
+  }
+
+  draft[field] = String(fieldElement.value || "");
+}
+
+function syncUsersMemberDraftsFromDom() {
+  if (!usersPanel) {
+    return;
+  }
+
+  const rows = usersPanel.querySelectorAll("[data-users-draft-row]");
+  rows.forEach((row) => {
+    const draftId = String(row.dataset.usersDraftRow || "");
+    const draft = usersState.memberDrafts.find((entry) => entry.id === draftId);
+    if (!draft) {
+      return;
+    }
+
+    row.querySelectorAll("[data-users-draft-field]").forEach((fieldElement) => {
+      const field = String(fieldElement.dataset.usersDraftField || "");
+      if (field === "active") {
+        draft.active = Boolean(fieldElement.checked);
+      } else if (field === "role") {
+        draft.role = normalizeUserRole(fieldElement.value);
+      } else if (field) {
+        draft[field] = String(fieldElement.value || "");
+      }
+    });
+  });
 }
 
 function getUsersEditingRecord() {
@@ -2044,6 +2304,10 @@ function renderUsersPanel() {
   }
 
   if (selectedProject) {
+    if (usersState.addMembersMode) {
+      renderUsersAddMembersPanel(selectedProject, feedback);
+      return;
+    }
     renderUsersProjectMembersPanel(selectedProject, projectNameMap, feedback);
     return;
   }
@@ -2148,22 +2412,173 @@ function renderUsersProjectsPanel(feedback) {
   `;
 }
 
+function renderUsersAddMembersPanel(project, feedback) {
+  const draftRows = usersState.memberDrafts
+    .map((draft, index) => {
+      const role = normalizeUserRole(draft.role);
+      return `
+        <tr data-users-draft-row="${escapeHtml(draft.id)}">
+          <td><input type="checkbox" checked aria-label="Seleccionar ${escapeHtml(draft.email)}" /></td>
+          <td>
+            <input
+              type="text"
+              class="users-input users-input--readonly"
+              value="${escapeHtml(draft.email)}"
+              readonly
+              title="${escapeHtml(draft.email)}"
+            />
+          </td>
+          <td>
+            <input
+              type="text"
+              class="users-input"
+              data-users-draft-field="firstName"
+              value="${escapeHtml(draft.firstName)}"
+              placeholder="Nombre"
+              maxlength="80"
+            />
+          </td>
+          <td>
+            <input
+              type="text"
+              class="users-input"
+              data-users-draft-field="lastName"
+              value="${escapeHtml(draft.lastName)}"
+              placeholder="Apellidos"
+              maxlength="100"
+            />
+          </td>
+          <td>
+            <input
+              type="text"
+              class="users-input"
+              data-users-draft-field="company"
+              value="${escapeHtml(draft.company)}"
+              placeholder="Empresa"
+              maxlength="120"
+            />
+          </td>
+          <td>
+            <select class="users-select" data-users-draft-field="role">
+              ${USER_ROLE_OPTIONS
+                .map((option) => {
+                  const selected = option === role ? " selected" : "";
+                  return `<option value="${option}"${selected}>${escapeHtml(getUserRoleLabel(option))}</option>`;
+                })
+                .join("")}
+            </select>
+          </td>
+          <td>
+            <label class="users-draft-active">
+              <input type="checkbox" data-users-draft-field="active" ${draft.active ? "checked" : ""} />
+              <span>${draft.active ? "Activo" : "Inactivo"}</span>
+            </label>
+          </td>
+          <td>
+            <button
+              type="button"
+              class="users-btn-icon-subtle"
+              data-users-action="remove-member-draft"
+              data-draft-id="${escapeHtml(draft.id)}"
+              aria-label="Quitar borrador ${index + 1}"
+            >
+              x
+            </button>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  usersPanel.innerHTML = `
+    <div class="users-admin-view users-admin-view--add-members">
+      <div class="users-page-header">
+        <div>
+          <div class="users-breadcrumb">
+            <button type="button" data-users-action="back-projects">Proyectos</button>
+            <span>/</span>
+            <button type="button" data-users-action="cancel-add-members">${escapeHtml(project.name)}</button>
+            <span>/</span>
+          </div>
+          <h2>Anadir miembros al proyecto</h2>
+          <p>${escapeHtml(project.name)}</p>
+        </div>
+      </div>
+
+      ${feedback}
+
+      <div class="users-add-members-box">
+        <label for="users-bulk-email-input">
+          Numero maximo de 100 direcciones de correo electronico <span class="users-required">*</span>
+        </label>
+        <div class="users-bulk-input-container">
+          <textarea
+            id="users-bulk-email-input"
+            data-users-member-email-input
+            placeholder="persona@empresa.com, otra@empresa.com..."
+          >${escapeHtml(usersState.memberEmailInput)}</textarea>
+          <button
+            type="button"
+            class="topbar-button"
+            data-users-action="process-member-emails"
+            ${usersState.saving ? "disabled" : ""}
+          >
+            Intro
+          </button>
+        </div>
+
+        <div class="users-manual-entry-panel">
+          <div>
+            <strong>Ingreso manual</strong>
+            <span>Agrega correos y completa nombre, empresa, estado y rol antes de guardar.</span>
+          </div>
+        </div>
+      </div>
+
+      ${
+        usersState.memberDrafts.length > 0
+          ? `
+            <div class="users-table-wrap users-drafts-table-wrap">
+              <table class="users-table users-drafts-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Correo electronico</th>
+                    <th>Nombre</th>
+                    <th>Apellidos</th>
+                    <th>Empresa</th>
+                    <th>Rol</th>
+                    <th>Estado</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>${draftRows}</tbody>
+              </table>
+            </div>
+          `
+          : ""
+      }
+
+      <div class="users-footer-actions">
+        <button type="button" class="topbar-button" data-users-action="cancel-add-members" ${usersState.saving ? "disabled" : ""}>
+          Cancelar
+        </button>
+        <button
+          type="button"
+          class="topbar-button topbar-button--primary"
+          data-users-action="save-member-drafts"
+          ${usersState.memberDrafts.length === 0 || usersState.saving ? "disabled" : ""}
+        >
+          ${usersState.saving ? "Anadiendo..." : `Anadir ${usersState.memberDrafts.length || ""} miembros`}
+        </button>
+      </div>
+    </div>
+  `;
+}
+
 function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
-  const editingUser = getUsersEditingRecord();
-  const editableUser = editingUser && normalizeUserRole(editingUser?.role) !== "superadmin"
-    ? editingUser
-    : null;
-  const email = editableUser ? String(editableUser.email || "") : "";
-  const displayName = editableUser ? getUsersDisplayName(editableUser) : "";
-  const role = normalizeUserRole(editableUser?.role || "viewer");
-  const activeChecked = editableUser ? editableUser.active !== false : true;
   const members = getProjectMembers(project.id);
   const summary = getProjectMembershipSummary(project.id);
-  const submitLabel = usersState.saving
-    ? "Guardando..."
-    : editableUser
-      ? "Guardar miembro"
-      : "Anadir miembro";
 
   const memberRows = members
     .map((entry) => {
@@ -2244,7 +2659,7 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
 
       <div class="users-toolbar">
         <button type="button" class="topbar-button topbar-button--primary" data-users-action="new-member">
-          Anadir miembro
+          Anadir miembros
         </button>
         <div class="users-toolbar-summary">
           <strong>${summary.active}</strong>
@@ -2256,109 +2671,45 @@ function renderUsersProjectMembersPanel(project, projectNameMap, feedback) {
         </div>
       </div>
 
-      <div class="users-members-layout">
-        <section class="users-card users-member-form-card">
-          <div class="users-card-head">
-            <strong>${editableUser ? "Editar miembro" : "Anadir miembro"}</strong>
-            ${editableUser ? `<button type="button" class="topbar-button" data-users-action="new-member">Nuevo</button>` : ""}
-          </div>
-          <form class="users-form" data-users-project-member-form autocomplete="off">
-            <input type="hidden" name="projectId" value="${escapeHtml(project.id)}" />
-
-            <label for="users-display-name-input">Nombre</label>
-            <input
-              id="users-display-name-input"
-              name="displayName"
-              type="text"
-              required
-              maxlength="120"
-              value="${escapeHtml(displayName)}"
-              placeholder="Nombre visible"
-            />
-
-            <label for="users-email-input">Correo</label>
-            <input
-              id="users-email-input"
-              name="email"
-              type="email"
-              required
-              maxlength="320"
-              value="${escapeHtml(email)}"
-              placeholder="usuario@dominio.com"
-              ${editableUser ? 'readonly aria-readonly="true"' : ""}
-            />
-
-            <label for="users-role-select">Rol</label>
-            <select id="users-role-select" name="role">
-              ${USER_ROLE_OPTIONS
-                .map((option) => {
-                  const selected = option === role ? " selected" : "";
-                  return `<option value="${option}"${selected}>${escapeHtml(getUserRoleLabel(option))}</option>`;
-                })
-                .join("")}
-            </select>
-
-            <p class="users-field-help">
-              Viewer solo lee, Editor guarda cambios, Admin gestiona datos del proyecto y Superadmin obtiene acceso total.
-            </p>
-
-            <label class="users-checkbox-row">
-              <input type="checkbox" name="active" ${activeChecked ? "checked" : ""} />
-              Usuario activo
-            </label>
-
-            <div class="users-form-actions">
-              <button
-                type="submit"
-                class="topbar-button topbar-button--primary"
-                ${usersState.saving ? "disabled" : ""}
-              >
-                ${submitLabel}
-              </button>
-            </div>
-          </form>
-        </section>
-
-        <section class="users-card users-member-list-card">
-          <div class="users-card-head">
-            <strong>${escapeHtml(project.name)}</strong>
-            <span class="users-count-pill">${members.length}</span>
-          </div>
-          ${
-            usersState.loading && !usersState.loaded
+      <section class="users-card users-member-list-card users-member-list-card--full">
+        <div class="users-card-head">
+          <strong>${escapeHtml(project.name)}</strong>
+          <span class="users-count-pill">${members.length}</span>
+        </div>
+        ${
+          usersState.loading && !usersState.loaded
+            ? `
+              <div class="empty-state">
+                <strong>Cargando miembros...</strong>
+                <p>Sincronizando la lista desde MySQL.</p>
+              </div>
+            `
+            : members.length === 0
               ? `
                 <div class="empty-state">
-                  <strong>Cargando miembros...</strong>
-                  <p>Sincronizando la lista desde MySQL.</p>
+                  <strong>Sin miembros directos</strong>
+                  <p>Anade el primer miembro para habilitar acceso a este proyecto.</p>
                 </div>
               `
-              : members.length === 0
-                ? `
-                  <div class="empty-state">
-                    <strong>Sin miembros directos</strong>
-                    <p>Anade el primer miembro para habilitar acceso a este proyecto.</p>
-                  </div>
-                `
-                : `
-                  <div class="users-table-wrap">
-                    <table class="users-table users-members-table">
-                      <thead>
-                        <tr>
-                          <th>Nombre</th>
-                          <th>Rol</th>
-                          <th>Estado</th>
-                          <th>Alcance</th>
-                          <th>Actualizado</th>
-                          <th>Accion</th>
-                        </tr>
-                      </thead>
-                      <tbody>${memberRows}</tbody>
-                    </table>
-                  </div>
-                `
-          }
-        </section>
-      </div>
+              : `
+                <div class="users-table-wrap">
+                  <table class="users-table users-members-table">
+                    <thead>
+                      <tr>
+                        <th>Nombre</th>
+                        <th>Rol</th>
+                        <th>Estado</th>
+                        <th>Alcance</th>
+                        <th>Actualizado</th>
+                        <th>Accion</th>
+                      </tr>
+                    </thead>
+                    <tbody>${memberRows}</tbody>
+                  </table>
+                </div>
+              `
+        }
+      </section>
     </div>
   `;
 }
@@ -2369,7 +2720,18 @@ function startUsersEdit(emailInput) {
     return;
   }
 
+  const user = usersState.items.find((entry) => entry.email === email) || null;
+  if (!user) {
+    usersState.error = "No se encontro el usuario seleccionado.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
   usersState.editingEmail = email;
+  usersState.addMembersMode = true;
+  usersState.memberEmailInput = "";
+  usersState.memberDrafts = [createUsersMemberDraft(email, user)];
   usersState.error = "";
   usersState.info = `Editando ${email}`;
   renderUsersPanel();
@@ -2543,6 +2905,114 @@ async function handleUsersFormSubmit(formElement) {
       error instanceof Error
         ? error.message
         : "No se pudo guardar el usuario.";
+  } finally {
+    usersState.saving = false;
+    if (state.currentView === "usuarios") {
+      renderUsersPanel();
+    }
+  }
+}
+
+async function saveUsersMemberDrafts() {
+  if (!isUsersViewAllowed() || usersState.saving) {
+    return;
+  }
+
+  syncUsersMemberDraftsFromDom();
+
+  const selectedProject = getUsersSelectedProject();
+  if (!selectedProject) {
+    usersState.error = "Selecciona un proyecto valido para asignar miembros.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  if (usersState.memberDrafts.length === 0) {
+    usersState.error = "Agrega al menos un correo antes de guardar.";
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const invalidDraft = usersState.memberDrafts.find((draft) => !isValidUsersEmail(draft.email));
+  if (invalidDraft) {
+    usersState.error = `Revisa el correo ${invalidDraft.email}.`;
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  const missingNameDraft = usersState.memberDrafts.find((draft) => !String(draft.firstName || "").trim());
+  if (missingNameDraft) {
+    usersState.error = `Completa el nombre para ${missingNameDraft.email}.`;
+    usersState.info = "";
+    renderUsersPanel();
+    return;
+  }
+
+  usersState.saving = true;
+  usersState.error = "";
+  usersState.info = "";
+  renderUsersPanel();
+
+  try {
+    for (const draft of usersState.memberDrafts) {
+      const email = String(draft.email || "").trim().toLowerCase();
+      const existingUser = usersState.items.find((entry) => entry.email === email) || null;
+      const existingRole = normalizeUserRole(existingUser?.role);
+      const requestedRole = normalizeUserRole(draft.role);
+      const displayName = getUsersDraftDisplayName(draft);
+      const active = draft.active !== false;
+
+      if (existingRole === "superadmin" && requestedRole !== "superadmin") {
+        throw new Error(`El usuario ${email} ya es superadmin y tiene acceso total.`);
+      }
+
+      const projectIds = requestedRole === "superadmin"
+        ? ["*"]
+        : normalizeUsersProjectIds([
+          ...normalizeUsersProjectIds(existingUser?.projectIds, { allowWildcard: false }),
+          selectedProject.id,
+        ], { allowWildcard: false });
+
+      const response = await window.fetch(AUTH_USERS_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({
+          email,
+          displayName,
+          role: requestedRole,
+          projectIds,
+          active,
+        }),
+      });
+
+      if (response.status === 401) {
+        handleUnauthorizedAccess("Tu sesion vencio. Vuelve a iniciar sesion.");
+        return;
+      }
+
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result?.ok) {
+        throw new Error(result?.error || `No se pudo guardar ${email}.`);
+      }
+    }
+
+    const savedCount = usersState.memberDrafts.length;
+    resetUsersAddMembersState();
+    usersState.editingEmail = "";
+    usersState.info = `${savedCount} miembro${savedCount === 1 ? "" : "s"} actualizado${savedCount === 1 ? "" : "s"} en ${selectedProject.name}.`;
+    await loadUsersForPanel({ force: true });
+  } catch (error) {
+    usersState.error =
+      error instanceof Error
+        ? error.message
+        : "No se pudieron guardar los miembros.";
   } finally {
     usersState.saving = false;
     if (state.currentView === "usuarios") {
