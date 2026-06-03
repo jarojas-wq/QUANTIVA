@@ -92,15 +92,15 @@ textarea {
   color: var(--danger);
 }
 
-.legacy-app-host,
-.legacy-app-host > .app-layout {
+.quantiva-app,
+.quantiva-app > .app-layout {
   width: 100%;
   height: 100%;
   min-height: 0;
 }
 
-/* ERP-Dechini shell skin applied over the preserved Quantiva engine. */
-.legacy-app-host .sidebar {
+/* ERP-Dechini shell skin for the React Quantiva workspace. */
+.quantiva-app .sidebar {
   width: 250px;
   min-width: 250px;
   background: linear-gradient(180deg, #102031 0%, #1a3148 100%);
@@ -110,48 +110,49 @@ textarea {
   gap: 0.75rem;
 }
 
-.legacy-app-host .sidebar-header,
-.legacy-app-host .sidebar-card {
+.quantiva-app .sidebar-header,
+.quantiva-app .sidebar-card {
   background: rgba(255, 255, 255, 0.035);
   border-color: rgba(128, 223, 213, 0.24);
 }
 
-.legacy-app-host .brand-mark {
+.quantiva-app .brand-mark {
   background: rgba(17, 126, 119, 0.25);
   border-color: rgba(128, 223, 213, 0.35);
   color: #eff6fb;
 }
 
-.legacy-app-host .brand-caption,
-.legacy-app-host .section-kicker,
-.legacy-app-host .sidebar-copy,
-.legacy-app-host .save-status {
+.quantiva-app .brand-caption,
+.quantiva-app .section-kicker,
+.quantiva-app .sidebar-copy,
+.quantiva-app .save-status {
   color: #9fc7dc;
 }
 
-.legacy-app-host .nav-item {
+.quantiva-app .nav-item {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.05);
   color: #eff6fb;
   border-radius: 0;
 }
 
-.legacy-app-host .nav-item--active,
-.legacy-app-host .nav-item:hover {
+.quantiva-app .nav-item--active,
+.quantiva-app .nav-item:hover {
   background: rgba(17, 126, 119, 0.22);
   border-color: rgba(128, 223, 213, 0.35);
 }
 
-.legacy-app-host .topbar {
+.quantiva-app .topbar {
   background: rgba(255, 255, 255, 0.92);
   border-bottom-color: var(--line);
 }
 
-.legacy-app-host .app-layout {
+.quantiva-app .app-layout {
   background: #eef3f7;
 }
 
-.legacy-app-host .sidebar {
+.quantiva-app .sidebar {
+  position: relative;
   width: 256px;
   min-width: 256px;
   height: 100vh;
@@ -161,28 +162,55 @@ textarea {
   color: #e2e8f0;
   padding: 0;
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22);
+  transition:
+    width 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    min-width 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 200ms ease;
+  will-change: width;
 }
 
-.legacy-app-host .sidebar-header {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar {
+  width: 76px;
+  min-width: 76px;
+  box-shadow: 8px 0 24px rgba(15, 23, 42, 0.16);
+}
+
+.quantiva-app .sidebar-header {
   min-height: 70px;
   height: 70px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.4rem;
   border: 0;
   border-bottom: 1px solid rgba(30, 41, 59, 0.82);
   background: transparent;
-  padding: 1.05rem 1.2rem;
+  padding: 0 0.55rem 0 1.05rem;
+  transition:
+    justify-content 180ms ease,
+    padding 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.legacy-app-host .brand-wrap {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-header {
+  grid-template-columns: 26px 26px;
+  justify-content: center;
+  gap: 0.35rem;
+  padding-inline: 0.45rem;
+}
+
+.quantiva-app .brand-wrap {
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 0.65rem;
 }
 
-.legacy-app-host .brand-mark {
+.quantiva-app .app-layout.sidebar-collapsed .brand-wrap {
+  justify-content: center;
+  gap: 0;
+}
+
+.quantiva-app .brand-mark {
   width: 34px;
   height: 34px;
   flex: 0 0 auto;
@@ -196,13 +224,41 @@ textarea {
   letter-spacing: 0;
 }
 
-.legacy-app-host .brand-block {
+.quantiva-app .app-layout.sidebar-collapsed .brand-mark {
+  width: 26px;
+  height: 26px;
+  font-size: 0.72rem;
+}
+
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-product-button {
+  width: 26px;
+  height: 26px;
+}
+
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-product-copy,
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-product-caret {
+  display: none;
+}
+
+.quantiva-app .brand-block {
   min-width: 0;
   display: grid;
   gap: 0.08rem;
+  transition:
+    opacity 180ms ease,
+    max-width 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 220ms ease;
 }
 
-.legacy-app-host .brand-caption {
+.quantiva-app .app-layout.sidebar-collapsed .brand-block {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transform: translateX(-6px);
+  visibility: hidden;
+}
+
+.quantiva-app .brand-caption {
   order: -1;
   margin: 0;
   color: #94a3b8;
@@ -212,7 +268,7 @@ textarea {
   line-height: 1.1;
 }
 
-.legacy-app-host .brand-title {
+.quantiva-app .brand-title {
   overflow: hidden;
   color: #ffffff;
   font-size: 1rem;
@@ -222,27 +278,47 @@ textarea {
   white-space: nowrap;
 }
 
-.legacy-app-host .sidebar-toggle-button {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  margin-left: auto;
-  border: 0;
-  border-radius: 0.45rem;
-  background: transparent;
-  color: #94a3b8;
+.quantiva-app .sidebar-panel-toggle {
+  position: static;
+  justify-self: end;
+  z-index: 3;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(128, 223, 213, 0.26);
+  border-radius: 0.42rem;
+  background: rgba(15, 23, 42, 0.42);
+  color: #b6c8d8;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.18);
+  transition:
+    background 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    transform 0.18s ease;
 }
 
-.legacy-app-host .sidebar-toggle-button:hover,
-.legacy-app-host .sidebar-toggle-button:focus-visible {
-  background: rgba(30, 41, 59, 0.8);
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-panel-toggle {
+  width: 26px;
+  height: 26px;
+  transform: none;
+}
+
+.quantiva-app .sidebar-panel-toggle:hover,
+.quantiva-app .sidebar-panel-toggle:focus-visible {
+  border-color: rgba(128, 223, 213, 0.5);
+  background: rgba(30, 41, 59, 0.92);
   color: #e2e8f0;
   outline: none;
+  transform: translateY(-1px);
 }
 
-.legacy-app-host .sidebar-toggle-button svg,
-.legacy-app-host .sidebar-nav-group-toggle svg,
-.legacy-app-host .nav-item svg {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-panel-toggle:hover,
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-panel-toggle:focus-visible {
+  transform: translateY(-1px);
+}
+
+.quantiva-app .sidebar-panel-toggle svg,
+.quantiva-app .sidebar-nav-group-toggle svg,
+.quantiva-app .nav-item svg {
   width: 18px;
   height: 18px;
   fill: none;
@@ -252,15 +328,26 @@ textarea {
   stroke-linejoin: round;
 }
 
-.legacy-app-host .sidebar-nav {
+.quantiva-app .sidebar-nav {
   flex: 0 0 auto;
   display: grid;
   gap: 0.28rem;
   border: 0;
   padding: 1rem 0.75rem 0.55rem;
+  opacity: 1;
+  visibility: visible;
+  transition:
+    padding 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    gap 220ms ease;
 }
 
-.legacy-app-host .sidebar-nav-group-toggle {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-nav {
+  gap: 0.42rem;
+  padding: 0.9rem 0.5rem 0.55rem;
+  pointer-events: auto;
+}
+
+.quantiva-app .sidebar-nav-group-toggle {
   width: 100%;
   min-height: 34px;
   display: flex;
@@ -275,22 +362,45 @@ textarea {
   font-weight: 900;
   letter-spacing: 0.09em;
   text-transform: uppercase;
+  overflow: hidden;
+  transition:
+    min-height 220ms ease,
+    padding 260ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.legacy-app-host .sidebar-section-label {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-nav-group-toggle {
+  justify-content: center;
+  min-height: 28px;
+  padding-inline: 0;
+}
+
+.quantiva-app .sidebar-section-label {
   min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
 }
 
-.legacy-app-host .sidebar-section-label span {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-section-label {
+  justify-content: center;
+  gap: 0;
+}
+
+.quantiva-app .sidebar-section-label span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition:
+    opacity 160ms ease,
+    max-width 240ms ease;
 }
 
-.legacy-app-host .nav-item {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-section-label span {
+  max-width: 0;
+  opacity: 0;
+}
+
+.quantiva-app .nav-item {
   width: 100%;
   min-height: 38px;
   display: flex;
@@ -311,72 +421,108 @@ textarea {
   transition:
     background 0.16s ease,
     color 0.16s ease,
-    transform 0.16s ease;
+    transform 0.16s ease,
+    padding 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    justify-content 180ms ease;
 }
 
-.legacy-app-host .nav-item span {
+.quantiva-app .app-layout.sidebar-collapsed .nav-item {
+  justify-content: center;
+  gap: 0;
+  min-height: 42px;
+  padding: 0.68rem 0;
+}
+
+.quantiva-app .nav-item span {
   min-width: 0;
   overflow: hidden;
   font-size: 0.88rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition:
+    opacity 150ms ease,
+    max-width 240ms ease,
+    transform 180ms ease;
 }
 
-.legacy-app-host .nav-item svg {
+.quantiva-app .app-layout.sidebar-collapsed .nav-item span {
+  max-width: 0;
+  opacity: 0;
+  transform: translateX(-4px);
+}
+
+.quantiva-app .nav-item svg {
   flex: 0 0 auto;
   color: #94a3b8;
-  transition: color 0.16s ease;
+  transition:
+    color 0.16s ease,
+    transform 180ms ease;
 }
 
-.legacy-app-host .nav-item:hover:enabled,
-.legacy-app-host .nav-item:focus-visible {
+.quantiva-app .app-layout.sidebar-collapsed .nav-item svg {
+  transform: scale(1.04);
+}
+
+.quantiva-app .nav-item:hover:enabled,
+.quantiva-app .nav-item:focus-visible {
   border: 0;
   background: rgba(30, 41, 59, 0.8);
   color: #ffffff;
   outline: none;
 }
 
-.legacy-app-host .nav-item:hover:enabled svg,
-.legacy-app-host .nav-item:focus-visible svg {
+.quantiva-app .nav-item:hover:enabled svg,
+.quantiva-app .nav-item:focus-visible svg {
   color: #e2e8f0;
 }
 
-.legacy-app-host .nav-item--active,
-.legacy-app-host .nav-item--active:hover:enabled {
+.quantiva-app .nav-item--active,
+.quantiva-app .nav-item--active:hover:enabled {
   border: 0;
   background: rgba(37, 99, 235, 0.12);
   color: #60a5fa;
   font-weight: 800;
 }
 
-.legacy-app-host .nav-item--active svg {
+.quantiva-app .nav-item--active svg {
   color: #60a5fa;
 }
 
-.legacy-app-host .sidebar-body {
+.quantiva-app .sidebar-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding: 0.35rem 0.75rem 0.8rem;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+  transition:
+    opacity 190ms ease,
+    visibility 190ms ease,
+    transform 240ms ease;
 }
 
-.legacy-app-host .sidebar-body::-webkit-scrollbar {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-body {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-8px);
+  visibility: hidden;
+}
+
+.quantiva-app .sidebar-body::-webkit-scrollbar {
   width: 8px;
 }
 
-.legacy-app-host .sidebar-body::-webkit-scrollbar-track {
+.quantiva-app .sidebar-body::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.legacy-app-host .sidebar-body::-webkit-scrollbar-thumb {
+.quantiva-app .sidebar-body::-webkit-scrollbar-thumb {
   border: 2px solid #102031;
   border-radius: 999px;
   background: rgba(148, 163, 184, 0.46);
 }
 
-.legacy-app-host .section-kicker {
+.quantiva-app .section-kicker {
   margin: 0 0 0.45rem;
   color: #94a3b8;
   font-size: 0.68rem;
@@ -384,11 +530,11 @@ textarea {
   letter-spacing: 0.09em;
 }
 
-.legacy-app-host .sidebar-section + .sidebar-section {
+.quantiva-app .sidebar-section + .sidebar-section {
   margin-top: 0.9rem;
 }
 
-.legacy-app-host .sidebar-card {
+.quantiva-app .sidebar-card {
   border: 1px solid rgba(55, 89, 122, 0.48);
   border-radius: 0.55rem;
   background: rgba(16, 32, 49, 0.36);
@@ -396,45 +542,60 @@ textarea {
   padding: 0.75rem;
 }
 
-.legacy-app-host .sidebar-card-title {
+.quantiva-app .sidebar-card-title {
   color: #ffffff;
   font-size: 0.82rem;
   font-weight: 820;
 }
 
-.legacy-app-host .sidebar-copy,
-.legacy-app-host .save-status {
+.quantiva-app .sidebar-copy,
+.quantiva-app .save-status {
   color: #b6c8d8;
   font-size: 0.78rem;
   line-height: 1.45;
 }
 
-.legacy-app-host .sidebar-footer {
+.quantiva-app .sidebar-footer {
   flex: 0 0 auto;
   border-top: 1px solid rgba(55, 89, 122, 0.48);
   background: rgba(16, 32, 49, 0.36);
   padding: 0.85rem 0.75rem;
+  transition:
+    justify-content 180ms ease,
+    padding 260ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.legacy-app-host .save-dot {
+.quantiva-app .app-layout.sidebar-collapsed .sidebar-footer {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.quantiva-app .app-layout.sidebar-collapsed .save-status {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+
+.quantiva-app .save-dot {
   background: #60a5fa;
   box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.13);
 }
 
-.legacy-app-host .topbar {
+.quantiva-app .topbar {
   height: 54px;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.96);
   padding: 0 1.35rem;
 }
 
-.legacy-app-host .topbar-copy strong {
+.quantiva-app .topbar-copy strong {
   color: #102031;
   font-size: 0.98rem;
   font-weight: 850;
 }
 
-.legacy-app-host .topbar-copy span {
+.quantiva-app .topbar-copy span {
   color: #53677c;
   font-size: 0.68rem;
   font-weight: 700;

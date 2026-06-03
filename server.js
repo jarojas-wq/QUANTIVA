@@ -1120,6 +1120,11 @@ class MySQLStorage {
               MTRD_Proyecto_ActualizadoEn,
               MTRD_Proyecto_Estado
             ) VALUES (?, ?, ?, ?, 1)
+            ON DUPLICATE KEY UPDATE
+              MTRD_Proyecto_ID = LAST_INSERT_ID(MTRD_Proyecto_ID),
+              MTRD_Proyecto_Nombre = VALUES(MTRD_Proyecto_Nombre),
+              MTRD_Proyecto_ActualizadoEn = VALUES(MTRD_Proyecto_ActualizadoEn),
+              MTRD_Proyecto_Estado = 1
           `, [
             projectUid,
             normalizeText(project.name, `Proyecto ${projectIndex + 1}`),
@@ -2027,6 +2032,16 @@ function createAccessControlManager(filePath, options = {}) {
         };
       }
 
+      if (!userCanAccessAnyProject(user)) {
+        sessions.delete(token);
+        await deleteSessionFromStore(token);
+        return {
+          ok: false,
+          status: 403,
+          error: "Tu cuenta no tiene proyectos asignados. Contacta al superadmin.",
+        };
+      }
+
       if (!userHasRole(user.role, requestedRole)) {
         return {
           ok: false,
@@ -2135,14 +2150,6 @@ function createAccessControlManager(filePath, options = {}) {
         projectIds,
         requestedRole,
       );
-      if (requestedRole !== "superadmin" && active && availableProjectIdSet.size > 0 && projectIds.length === 0) {
-        return {
-          ok: false,
-          status: 400,
-          error: "Debes asignar al menos un proyecto al usuario activo.",
-        };
-      }
-
       if (existing) {
         existing.displayName = displayName;
         existing.role = requestedRole;
@@ -3471,6 +3478,13 @@ function buildWebAuthSession(user, publicSettings, expiresAt = "") {
     expiresAt: expiresAt ? normalizeIsoString(expiresAt) : "",
     role,
     projectIds: Array.isArray(accessUser?.projectIds) ? accessUser.projectIds : [],
+    viewAccessByProject: accessUser
+      ? normalizeViewAccessByProjectInput(
+        accessUser.viewAccessByProject,
+        role === "superadmin" ? ["*"] : accessUser.projectIds,
+        role,
+      )
+      : {},
   };
 }
 

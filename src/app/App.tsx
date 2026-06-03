@@ -1,7 +1,7 @@
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "../features/auth/auth-context";
 import { LoginPage } from "../features/auth/LoginPage";
-import { LegacyAppHost } from "../features/legacy/LegacyAppHost";
+import { QuantivaWorkspace } from "../features/workspace/QuantivaWorkspace";
 
 function ProtectedRoute() {
   const { session, loading } = useAuth();
@@ -20,13 +20,13 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route element={<ProtectedRoute />}>
-          <Route path="/itemizado" element={<LegacyAppHost />} />
-          <Route path="/presupuesto" element={<LegacyAppHost />} />
-          <Route path="/control-bim" element={<LegacyAppHost />} />
-          <Route path="/auditoria" element={<LegacyAppHost />} />
-          <Route path="/usuarios" element={<LegacyAppHost />} />
-          <Route path="/exportaciones-rvt" element={<LegacyAppHost />} />
-          <Route path="/exportacion-presupuesto" element={<LegacyAppHost />} />
+          <Route path="/itemizado" element={<QuantivaWorkspace />} />
+          <Route path="/presupuesto" element={<QuantivaWorkspace />} />
+          <Route path="/control-bim" element={<QuantivaWorkspace />} />
+          <Route path="/auditoria" element={<QuantivaWorkspace />} />
+          <Route path="/usuarios" element={<QuantivaWorkspace />} />
+          <Route path="/exportaciones-rvt" element={<QuantivaWorkspace />} />
+          <Route path="/exportacion-presupuesto" element={<QuantivaWorkspace />} />
         </Route>
         <Route path="*" element={<Navigate to="/itemizado" replace />} />
       </Routes>

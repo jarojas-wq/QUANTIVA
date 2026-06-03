@@ -35,7 +35,8 @@ function emptySession(): WebAuthSession {
     hostedDomain: "",
     expiresAt: "",
     role: "",
-    projectIds: []
+    projectIds: [],
+    viewAccessByProject: {}
   };
 }
 
