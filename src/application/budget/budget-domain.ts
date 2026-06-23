@@ -1,17 +1,26 @@
 import type {
   AccessUser,
+  ApuCategory,
+  ApuItem,
   AuditEntry,
   BudgetProject,
   BudgetRow,
+  BudgetSettings,
   BudgetSnapshot,
   BudgetSnapshotSummary,
+  MetradoItem,
+  PolynomialGroup,
   RevitExportRecord,
+  ResourceCatalogItem,
+  UnitCatalogItem,
   ViewKey,
   WebAuthSession
 } from "../../domain/models";
 import {
+  APU_CATEGORY_OPTIONS,
   DEFAULT_METRADO_RULE,
   DEFAULT_OPERATOR_NAME,
+  DEFAULT_UNIT_CATALOG_ITEMS,
   DEFAULT_USER_PROJECT_VIEW_KEYS,
   USER_PROJECT_VIEW_KEYS
 } from "./budget-config";
@@ -20,6 +29,20 @@ type RowInput = Partial<BudgetRow> & Record<string, unknown>;
 type ProjectInput = Partial<BudgetProject> & Record<string, unknown>;
 type SnapshotInput = Partial<BudgetSnapshot> & Record<string, unknown>;
 type AuditInput = Partial<AuditEntry> & Record<string, unknown>;
+type ApuInput = Partial<ApuItem> & Record<string, unknown>;
+type MetradoInput = Partial<MetradoItem> & Record<string, unknown>;
+type BudgetSettingsInput = Partial<BudgetSettings> & Record<string, unknown>;
+type PolynomialGroupInput = Partial<PolynomialGroup> & Record<string, unknown>;
+type ResourceCatalogInput = Partial<ResourceCatalogItem> & Record<string, unknown>;
+type UnitCatalogInput = Partial<UnitCatalogItem> & Record<string, unknown>;
+
+const APU_WORKDAY_HOURS = 8;
+const DEFAULT_BUDGET_SETTINGS: BudgetSettings = {
+  gastosGeneralesPercent: "",
+  utilidadPercent: "",
+  igvPercent: "18",
+  includeIgv: true
+};
 
 export interface VisibleBudgetEntry {
   row: BudgetRow;
@@ -78,8 +101,27 @@ export interface BudgetVersion {
   userName: string;
   createdAt: string;
   versionNumber: number;
-  snapshotType: "manual" | "current";
+  snapshotType: BudgetSnapshot["snapshotType"] | "current";
   baseSnapshotId: string | null;
+}
+
+export interface BudgetTotals {
+  costoDirecto: number;
+  gastosGenerales: number;
+  utilidad: number;
+  subtotal: number;
+  igv: number;
+  total: number;
+}
+
+export interface PolynomialBreakdownItem {
+  groupId: string;
+  codigo: string;
+  descripcion: string;
+  indice: string;
+  categoria: ApuCategory;
+  costo: number;
+  incidenciaPercent: number;
 }
 
 export function createId(prefix = "id") {
@@ -89,8 +131,374 @@ export function createId(prefix = "id") {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-export function createRow(overrides: Partial<BudgetRow> = {}): BudgetRow {
+export function createApuItem(overrides: Partial<ApuItem> = {}): ApuItem {
+  return normalizeApuItem({
+    id: createId("apu"),
+    resourceId: "",
+    subpartidaId: "",
+    category: "mano-obra",
+    descripcion: "",
+    cuadrilla: "",
+    unidad: "",
+    cantidad: "",
+    precioUnitario: "",
+    ...overrides
+  });
+}
+
+export function normalizeApuItems(itemsInput: Array<ApuInput | ApuItem> | unknown): ApuItem[] {
+  return asArray<ApuInput>(itemsInput)
+    .filter((item) => item && typeof item === "object")
+    .map((item) => normalizeApuItem(item));
+}
+
+export function normalizeApuItem(itemInput: ApuInput | ApuItem): ApuItem {
   return {
+    id: sanitizeIdentifier(itemInput.id, createId("apu")),
+    resourceId: sanitizeIdentifier(itemInput.resourceId, ""),
+    subpartidaId: sanitizeIdentifier(itemInput.subpartidaId, ""),
+    category: sanitizeApuCategory(itemInput.category),
+    descripcion: sanitizeDescripcion(itemInput.descripcion).trim().replace(/\s+/g, " "),
+    cuadrilla: normalizeDecimalString(itemInput.cuadrilla),
+    unidad: sanitizeUnidadPartida(itemInput.unidad),
+    cantidad: normalizeDecimalString(itemInput.cantidad),
+    precioUnitario: normalizeDecimalString(itemInput.precioUnitario)
+  };
+}
+
+export function createResourceCatalogItem(overrides: Partial<ResourceCatalogItem> = {}): ResourceCatalogItem {
+  return normalizeResourceCatalogItem({
+    id: createId("resource"),
+    category: "materiales",
+    descripcion: "",
+    unidad: "",
+    precioUnitario: "",
+    polynomialGroupId: "",
+    orden: 0,
+    ...overrides
+  }, 0);
+}
+
+export function createUnitCatalogItem(overrides: Partial<UnitCatalogItem> = {}): UnitCatalogItem {
+  return normalizeUnitCatalogItem({
+    id: createId("unit"),
+    codigo: "",
+    descripcion: "",
+    orden: 0,
+    ...overrides
+  }, 0);
+}
+
+export function normalizeUnitCatalogItems(itemsInput: Array<UnitCatalogInput | UnitCatalogItem> | unknown): UnitCatalogItem[] {
+  const byCode = new Map<string, UnitCatalogItem>();
+  const pushUnit = (unitInput: UnitCatalogInput | UnitCatalogItem, index: number) => {
+    const unit = normalizeUnitCatalogItem(unitInput, index);
+    if (!unit.codigo || !unit.descripcion) return;
+    byCode.set(unit.codigo.trim().toLowerCase(), unit);
+  };
+  DEFAULT_UNIT_CATALOG_ITEMS.forEach(pushUnit);
+  asArray<UnitCatalogInput>(itemsInput)
+    .filter((item) => item && typeof item === "object")
+    .forEach(pushUnit);
+  return Array.from(byCode.values()).sort((left, right) => left.orden - right.orden);
+}
+
+export function normalizeUnitCatalogItem(itemInput: UnitCatalogInput | UnitCatalogItem, index = 0): UnitCatalogItem {
+  return {
+    id: sanitizeIdentifier(itemInput.id, createId("unit")),
+    codigo: sanitizeUnitCode(itemInput.codigo),
+    descripcion: sanitizeUnitDescription(itemInput.descripcion),
+    orden: sanitizeResourceCatalogOrder(itemInput.orden, index)
+  };
+}
+
+export function getUnitCatalogCodes(itemsInput: Array<UnitCatalogInput | UnitCatalogItem> | unknown) {
+  return normalizeUnitCatalogItems(itemsInput).map((item) => item.codigo);
+}
+
+export function formatUnitCatalogLabel(unitCode: unknown, itemsInput: Array<UnitCatalogInput | UnitCatalogItem> | unknown) {
+  const codigo = sanitizeUnitCode(unitCode);
+  if (!codigo) return "";
+  const unit = normalizeUnitCatalogItems(itemsInput).find((item) => item.codigo.trim().toLowerCase() === codigo.toLowerCase());
+  return unit?.descripcion ? `${codigo} (${unit.descripcion})` : codigo;
+}
+
+export function isDefaultUnitCatalogItem(unit: UnitCatalogItem | null | undefined) {
+  return String(unit?.id || "").startsWith("default-unit-");
+}
+
+export function normalizeResourceCatalogItems(itemsInput: Array<ResourceCatalogInput | ResourceCatalogItem> | unknown): ResourceCatalogItem[] {
+  return asArray<ResourceCatalogInput>(itemsInput)
+    .filter((item) => item && typeof item === "object")
+    .map((item, index) => normalizeResourceCatalogItem(item, index))
+    .sort((left, right) => {
+      const leftCategoryIndex = APU_CATEGORY_OPTIONS.findIndex((option) => option.key === left.category);
+      const rightCategoryIndex = APU_CATEGORY_OPTIONS.findIndex((option) => option.key === right.category);
+      if (leftCategoryIndex !== rightCategoryIndex) return leftCategoryIndex - rightCategoryIndex;
+      return left.orden - right.orden;
+    });
+}
+
+export function normalizeResourceCatalogItem(itemInput: ResourceCatalogInput | ResourceCatalogItem, index = 0): ResourceCatalogItem {
+  return {
+    id: sanitizeIdentifier(itemInput.id, createId("resource")),
+    category: sanitizeApuCategory(itemInput.category),
+    descripcion: sanitizeDescripcion(itemInput.descripcion).trim().replace(/\s+/g, " "),
+    unidad: sanitizeUnidadPartida(itemInput.unidad),
+    precioUnitario: normalizeDecimalString(itemInput.precioUnitario),
+    polynomialGroupId: sanitizeIdentifier(itemInput.polynomialGroupId, ""),
+    orden: sanitizeResourceCatalogOrder(itemInput.orden, index)
+  };
+}
+
+export function applyResourceToApuItem(itemInput: ApuInput | ApuItem, resourceInput: ResourceCatalogInput | ResourceCatalogItem): ApuItem {
+  const item = normalizeApuItem(itemInput);
+  const resource = normalizeResourceCatalogItem(resourceInput);
+  return normalizeApuItem({
+    ...item,
+    resourceId: resource.id,
+    subpartidaId: "",
+    category: resource.category,
+    descripcion: resource.descripcion,
+    unidad: resource.unidad,
+    precioUnitario: resource.precioUnitario
+  });
+}
+
+export function getResourceCatalogItemsForCategory(itemsInput: Array<ResourceCatalogInput | ResourceCatalogItem> | unknown, category: ApuCategory) {
+  return normalizeResourceCatalogItems(itemsInput).filter((item) => item.category === category);
+}
+
+export function createMetradoItem(overrides: Partial<MetradoItem> = {}): MetradoItem {
+  return normalizeMetradoItem({
+    id: createId("metrado"),
+    descripcion: "",
+    veces: "",
+    largo: "",
+    ancho: "",
+    alto: "",
+    parcial: "",
+    ...overrides
+  });
+}
+
+export function normalizeMetradoItems(itemsInput: Array<MetradoInput | MetradoItem> | unknown): MetradoItem[] {
+  return asArray<MetradoInput>(itemsInput)
+    .filter((item) => item && typeof item === "object")
+    .map((item) => normalizeMetradoItem(item));
+}
+
+export function normalizeMetradoItem(itemInput: MetradoInput | MetradoItem): MetradoItem {
+  const item = {
+    id: sanitizeIdentifier(itemInput.id, createId("metrado")),
+    descripcion: sanitizeDescripcion(itemInput.descripcion).trim().replace(/\s+/g, " "),
+    veces: normalizeDecimalString(itemInput.veces),
+    largo: normalizeDecimalString(itemInput.largo),
+    ancho: normalizeDecimalString(itemInput.ancho),
+    alto: normalizeDecimalString(itemInput.alto),
+    parcial: normalizeDecimalString(itemInput.parcial)
+  };
+  return {
+    ...item,
+    parcial: getMetradoItemPartial(item).toFixed(6)
+  };
+}
+
+export function getMetradoItemPartial(itemInput: Partial<MetradoItem> | MetradoInput) {
+  return parseMetradoFactor(itemInput.veces)
+    * parseMetradoFactor(itemInput.largo)
+    * parseMetradoFactor(itemInput.ancho)
+    * parseMetradoFactor(itemInput.alto);
+}
+
+export function getMetradoTotal(itemsInput: Array<MetradoInput | MetradoItem> | unknown) {
+  return normalizeMetradoItems(itemsInput).reduce((sum, item) => sum + getMetradoItemPartial(item), 0);
+}
+
+export function applyMetradoTotalToRow(row: BudgetRow): BudgetRow {
+  const metradoItems = normalizeMetradoItems(row.metradoItems);
+  return metradoItems.length > 0
+    ? {
+      ...row,
+      metradoItems,
+      metradoTradicional: getMetradoTotal(metradoItems).toFixed(6)
+    }
+    : {
+      ...row,
+      metradoItems
+    };
+}
+
+export function createBudgetSettings(overrides: Partial<BudgetSettings> = {}): BudgetSettings {
+  return normalizeBudgetSettings({
+    ...DEFAULT_BUDGET_SETTINGS,
+    ...overrides
+  });
+}
+
+export function normalizeBudgetSettings(settingsInput: BudgetSettingsInput | BudgetSettings | unknown): BudgetSettings {
+  const settings = settingsInput && typeof settingsInput === "object"
+    ? settingsInput as BudgetSettingsInput
+    : {};
+  return {
+    gastosGeneralesPercent: normalizeDecimalString(settings.gastosGeneralesPercent),
+    utilidadPercent: normalizeDecimalString(settings.utilidadPercent),
+    igvPercent: normalizeDecimalString(settings.igvPercent ?? DEFAULT_BUDGET_SETTINGS.igvPercent),
+    includeIgv: settings.includeIgv !== false
+  };
+}
+
+export function getBudgetTotals(rowsInput: BudgetRow[], settingsInput: BudgetSettingsInput | BudgetSettings | unknown = DEFAULT_BUDGET_SETTINGS): BudgetTotals {
+  const rows = cloneRows(rowsInput);
+  const settings = normalizeBudgetSettings(settingsInput);
+  const costoDirecto = getGrandTotalForRows(rows);
+  const gastosGenerales = costoDirecto * parsePercent(settings.gastosGeneralesPercent);
+  const utilidad = costoDirecto * parsePercent(settings.utilidadPercent);
+  const subtotal = costoDirecto + gastosGenerales + utilidad;
+  const igv = settings.includeIgv ? subtotal * parsePercent(settings.igvPercent) : 0;
+  return {
+    costoDirecto,
+    gastosGenerales,
+    utilidad,
+    subtotal,
+    igv,
+    total: subtotal + igv
+  };
+}
+
+export function createPolynomialGroup(overrides: Partial<PolynomialGroup> = {}): PolynomialGroup {
+  return normalizePolynomialGroup({
+    id: createId("poly"),
+    codigo: "",
+    descripcion: "",
+    indice: "",
+    categoria: "materiales",
+    orden: 0,
+    ...overrides
+  }, 0);
+}
+
+export function normalizePolynomialGroups(itemsInput: Array<PolynomialGroupInput | PolynomialGroup> | unknown): PolynomialGroup[] {
+  return asArray<PolynomialGroupInput>(itemsInput)
+    .filter((item) => item && typeof item === "object")
+    .map((item, index) => normalizePolynomialGroup(item, index))
+    .sort((left, right) => left.orden - right.orden);
+}
+
+export function normalizePolynomialGroup(itemInput: PolynomialGroupInput | PolynomialGroup, index = 0): PolynomialGroup {
+  return {
+    id: sanitizeIdentifier(itemInput.id, createId("poly")),
+    codigo: sanitizeCodificacion(itemInput.codigo).trim(),
+    descripcion: sanitizeDescripcion(itemInput.descripcion).trim().replace(/\s+/g, " "),
+    indice: sanitizeDescripcion(itemInput.indice).trim().replace(/\s+/g, " "),
+    categoria: sanitizeApuCategory(itemInput.categoria),
+    orden: sanitizeResourceCatalogOrder(itemInput.orden, index)
+  };
+}
+
+export function filterResourceCatalogItems(
+  itemsInput: Array<ResourceCatalogInput | ResourceCatalogItem> | unknown,
+  filterQuery = "",
+  unitCatalogItems: Array<UnitCatalogInput | UnitCatalogItem> | unknown = []
+) {
+  const query = normalizeText(filterQuery).trim();
+  const items = normalizeResourceCatalogItems(itemsInput);
+  if (!query) return items;
+  return items.filter((item) => normalizeText([
+    getApuCategoryLabel(item.category),
+    item.descripcion,
+    item.unidad,
+    formatUnitCatalogLabel(item.unidad, unitCatalogItems),
+    item.precioUnitario,
+    item.polynomialGroupId
+  ].join(" ")).includes(query));
+}
+
+export function getApuCategoryLabel(category: ApuCategory) {
+  return APU_CATEGORY_OPTIONS.find((option) => option.key === category)?.label || "Mano de obra";
+}
+
+export function sanitizeApuCategory(value: unknown): ApuCategory {
+  const candidate = String(value || "").trim();
+  return APU_CATEGORY_OPTIONS.some((option) => option.key === candidate)
+    ? candidate as ApuCategory
+    : "mano-obra";
+}
+
+export function isApuItemCantidadCalculated(item: ApuInput | ApuItem) {
+  const category = sanitizeApuCategory(item.category);
+  return category === "mano-obra" || category === "equipos";
+}
+
+export function getApuItemRendimiento(item: ApuInput | ApuItem, row?: Partial<BudgetRow> | null) {
+  const category = sanitizeApuCategory(item.category);
+  if (category === "mano-obra") return parseDecimal(row?.rendimientoManoObra);
+  if (category === "equipos") return parseDecimal(row?.rendimientoEquipos);
+  return 0;
+}
+
+export function getApuItemCantidad(item: ApuInput | ApuItem, row?: Partial<BudgetRow> | null) {
+  if (!isApuItemCantidadCalculated(item)) return parseDecimal(item.cantidad);
+  if (!row) return parseDecimal(item.cantidad);
+  const rendimiento = getApuItemRendimiento(item, row);
+  if (rendimiento <= 0) return 0;
+  return (parseDecimal(item.cuadrilla) * APU_WORKDAY_HOURS) / rendimiento;
+}
+
+export function formatApuItemCantidad(item: ApuInput | ApuItem, row?: Partial<BudgetRow> | null) {
+  if (!isApuItemCantidadCalculated(item)) return normalizeDecimalString(item.cantidad);
+  return getApuItemCantidad(item, row).toFixed(6);
+}
+
+export function getApuItemPartial(item: ApuItem, row?: Partial<BudgetRow> | null) {
+  return getApuItemCantidad(item, row) * parseDecimal(item.precioUnitario);
+}
+
+export function getApuCategorySubtotal(itemsInput: Array<ApuInput | ApuItem> | unknown, category: ApuCategory, row?: Partial<BudgetRow> | null) {
+  return normalizeApuItems(itemsInput).reduce((sum, item) => (
+    item.category === category ? sum + getApuItemPartial(item, row) : sum
+  ), 0);
+}
+
+export function getApuTotal(itemsInput: Array<ApuInput | ApuItem> | unknown, row?: Partial<BudgetRow> | null) {
+  return normalizeApuItems(itemsInput).reduce((sum, item) => sum + getApuItemPartial(item, row), 0);
+}
+
+export function hasApuItems(row: BudgetRow | null | undefined) {
+  return Array.isArray(row?.apuItems) && row.apuItems.length > 0;
+}
+
+export function formatApuTotalAsCosto(itemsInput: Array<ApuInput | ApuItem> | unknown, row?: Partial<BudgetRow> | null) {
+  return getApuTotal(itemsInput, row).toFixed(6);
+}
+
+export function applyCalculatedApuQuantities(row: BudgetRow): BudgetRow {
+  return {
+    ...row,
+    apuItems: normalizeApuItems(row.apuItems).map((item) => (
+      isApuItemCantidadCalculated(item)
+        ? { ...item, cantidad: formatApuItemCantidad(item, row) }
+        : item
+    ))
+  };
+}
+
+export function applyApuTotalToRow(row: BudgetRow): BudgetRow {
+  const rowWithCalculatedQuantities = applyCalculatedApuQuantities(row);
+  return hasApuItems(rowWithCalculatedQuantities)
+    ? {
+      ...rowWithCalculatedQuantities,
+      costo: getApuTotal(rowWithCalculatedQuantities.apuItems, rowWithCalculatedQuantities).toFixed(6)
+    }
+    : rowWithCalculatedQuantities;
+}
+
+export function applyRowCalculations(row: BudgetRow): BudgetRow {
+  return applyApuTotalToRow(applyMetradoTotalToRow(row));
+}
+
+export function createRow(overrides: Partial<BudgetRow> = {}): BudgetRow {
+  const row = {
     id: createId("row"),
     level: 0,
     codificacion: "",
@@ -101,8 +509,17 @@ export function createRow(overrides: Partial<BudgetRow> = {}): BudgetRow {
     metradoBim: "",
     tipoMetrado: "",
     reglaMetrado: "",
+    rendimientoManoObra: "",
+    rendimientoEquipos: "",
+    apuItems: [],
+    metradoItems: [],
     ...overrides
   };
+  return applyRowCalculations({
+    ...row,
+    apuItems: normalizeApuItems(row.apuItems),
+    metradoItems: normalizeMetradoItems(row.metradoItems)
+  });
 }
 
 export function createDefaultProject(name = "Proyecto 1"): BudgetProject {
@@ -113,6 +530,10 @@ export function createDefaultProject(name = "Proyecto 1"): BudgetProject {
     rows: [createRow()],
     auditEntries: [],
     snapshots: [],
+    budgetSettings: createBudgetSettings(),
+    polynomialGroups: [],
+    unitCatalogItems: DEFAULT_UNIT_CATALOG_ITEMS,
+    resourceCatalogItems: [],
     collapsedIds: [],
     createdAt: now,
     updatedAt: now
@@ -130,6 +551,10 @@ export function normalizeProjectRecord(projectInput: Partial<BudgetProject> | Re
     rows: normalizedRows,
     auditEntries: normalizeAuditEntries(asArray<AuditInput>(project.auditEntries)),
     snapshots: normalizeSnapshots(asArray<SnapshotInput>(project.snapshots)),
+    budgetSettings: normalizeBudgetSettings(project.budgetSettings),
+    polynomialGroups: normalizePolynomialGroups(project.polynomialGroups),
+    unitCatalogItems: normalizeUnitCatalogItems(project.unitCatalogItems),
+    resourceCatalogItems: normalizeResourceCatalogItems(project.resourceCatalogItems),
     latestRevitExport: normalizeRevitExportRecord(project.latestRevitExport),
     collapsedIds: asArray<unknown>(project.collapsedIds).filter(isString),
     createdAt,
@@ -166,10 +591,10 @@ export function serializeProject(project: BudgetProject): BudgetProject {
 }
 
 export function cloneRows(rowsInput: Array<RowInput | BudgetRow> | unknown): BudgetRow[] {
-  return normalizeRows(
+  const rows = normalizeRows(
     asArray<RowInput>(rowsInput).map((row) => {
       const tipoMetrado = sanitizeTipoMetrado(row.tipoMetrado ?? "");
-      return {
+      const normalizedRow = {
         ...createRow(),
         ...row,
         id: sanitizeIdentifier(row.id, createId("row")),
@@ -180,10 +605,16 @@ export function cloneRows(rowsInput: Array<RowInput | BudgetRow> | unknown): Bud
         metradoTradicional: normalizeDecimalString(row.metradoTradicional ?? row.metrado),
         metradoBim: normalizeDecimalString(row.metradoBim),
         tipoMetrado,
-        reglaMetrado: getReglaMetradoForTipo(tipoMetrado, row.reglaMetrado)
+        reglaMetrado: getReglaMetradoForTipo(tipoMetrado, row.reglaMetrado),
+        rendimientoManoObra: normalizeDecimalString(row.rendimientoManoObra),
+        rendimientoEquipos: normalizeDecimalString(row.rendimientoEquipos),
+        apuItems: normalizeApuItems(row.apuItems),
+        metradoItems: normalizeMetradoItems(row.metradoItems)
       };
+      return applyRowCalculations(normalizedRow);
     })
   );
+  return resolveApuSubpartidasForRows(rows);
 }
 
 export function normalizeRows(rows: BudgetRow[]): BudgetRow[] {
@@ -201,6 +632,85 @@ export function normalizeRows(rows: BudgetRow[]): BudgetRow[] {
     previousLevel = normalized.level;
     return normalized;
   });
+}
+
+export function resolveApuSubpartidasForRows(rowsInput: BudgetRow[]): BudgetRow[] {
+  const rows = rowsInput.map((row) => ({
+    ...row,
+    apuItems: normalizeApuItems(row.apuItems),
+    metradoItems: normalizeMetradoItems(row.metradoItems)
+  }));
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  const memo = new Map<string, BudgetRow>();
+
+  const resolveRow = (rowId: string, visiting = new Set<string>()): BudgetRow => {
+    const row = rowById.get(rowId);
+    if (!row) return createRow({ id: rowId });
+    if (memo.has(rowId)) return memo.get(rowId)!;
+    if (visiting.has(rowId)) {
+      const cycleRow = {
+        ...row,
+        costo: "0.000000"
+      };
+      memo.set(rowId, cycleRow);
+      return cycleRow;
+    }
+
+    const nextVisiting = new Set(visiting);
+    nextVisiting.add(rowId);
+    const resolvedItems = normalizeApuItems(row.apuItems).map((item) => {
+      if (!item.subpartidaId) return item;
+      const referenced = rowById.get(item.subpartidaId);
+      if (!referenced) {
+        return {
+          ...item,
+          precioUnitario: "0.000000"
+        };
+      }
+      const referencedRow = resolveRow(referenced.id, nextVisiting);
+      return normalizeApuItem({
+        ...item,
+        resourceId: "",
+        descripcion: item.descripcion || referencedRow.descripcion,
+        unidad: item.unidad || referencedRow.unidad,
+        precioUnitario: parseDecimal(referencedRow.costo).toFixed(6)
+      });
+    });
+    const resolvedRow = applyRowCalculations({
+      ...row,
+      apuItems: resolvedItems
+    });
+    memo.set(rowId, resolvedRow);
+    return resolvedRow;
+  };
+
+  rows.forEach((row) => resolveRow(row.id));
+  return rows.map((row) => memo.get(row.id) || row);
+}
+
+export function getApuSubpartidaCycleIds(rowsInput: BudgetRow[]) {
+  const rows = cloneRows(rowsInput).map((row) => ({
+    ...row,
+    apuItems: normalizeApuItems(row.apuItems)
+  }));
+  const dependencyMap = new Map<string, string[]>();
+  rows.forEach((row) => {
+    dependencyMap.set(row.id, row.apuItems.map((item) => item.subpartidaId || "").filter(Boolean));
+  });
+
+  const cycleIds = new Set<string>();
+  const visit = (rowId: string, stack: string[]) => {
+    const repeatedIndex = stack.indexOf(rowId);
+    if (repeatedIndex >= 0) {
+      stack.slice(repeatedIndex).forEach((id) => cycleIds.add(id));
+      return;
+    }
+    const dependencies = dependencyMap.get(rowId) || [];
+    dependencies.forEach((dependencyId) => visit(dependencyId, [...stack, rowId]));
+  };
+
+  rows.forEach((row) => visit(row.id, []));
+  return Array.from(cycleIds);
 }
 
 export function normalizeAuditEntries(entriesInput: Array<AuditInput | AuditEntry> | unknown): AuditEntry[] {
@@ -237,7 +747,7 @@ export function normalizeSnapshots(entriesInput: Array<SnapshotInput | BudgetSna
         userName: sanitizeOperatorName(entry.userName || DEFAULT_OPERATOR_NAME),
         createdAt: normalizeIsoString(entry.createdAt),
         versionNumber: Number.isInteger(parsedVersion) && parsedVersion > 0 ? parsedVersion : 0,
-        snapshotType: "manual" as const,
+        snapshotType: sanitizeSnapshotType(entry.snapshotType),
         baseSnapshotId: typeof entry.baseSnapshotId === "string" ? entry.baseSnapshotId : null
       };
     });
@@ -253,6 +763,8 @@ export function normalizeRevitExportRecord(entryInput: unknown): RevitExportReco
   return {
     id: (typeof entry.id === "string" || typeof entry.id === "number") ? entry.id : null,
     uid: String(entry.uid || ""),
+    documentUid: String(entry.documentUid || ""),
+    modelGuid: String(entry.modelGuid || ""),
     modelPath: String(entry.modelPath || ""),
     revitVersion: String(entry.revitVersion || ""),
     addinVersion: String(entry.addinVersion || ""),
@@ -300,6 +812,10 @@ export function buildPartidaCodes(rows: BudgetRow[]) {
 
 export function rowHasChildren(rows: BudgetRow[], index: number) {
   return index < rows.length - 1 && rows[index + 1].level > rows[index].level;
+}
+
+export function canRowUseApu(rows: BudgetRow[], index: number) {
+  return index >= 0 && index < rows.length && !rowHasChildren(rows, index);
 }
 
 export function getParentIndex(rows: BudgetRow[], index: number) {
@@ -404,7 +920,9 @@ export function getVisibleEntries(
       row.descripcion,
       row.unidad,
       row.tipoMetrado,
-      row.reglaMetrado
+      row.reglaMetrado,
+      row.rendimientoManoObra,
+      row.rendimientoEquipos
     ].join(" "));
     if (searchable.includes(query)) {
       entries.push({ row, index, code });
@@ -506,17 +1024,33 @@ export function isHeadingRow(rows: BudgetRow[], row: BudgetRow, index: number) {
     && !String(row.unidad || "").trim()
     && !String(row.tipoMetrado || "").trim()
     && !String(row.reglaMetrado || "").trim()
+    && !String(row.rendimientoManoObra || "").trim()
+    && !String(row.rendimientoEquipos || "").trim()
     && parseDecimal(row.costo) === 0
     && parseDecimal(row.metradoTradicional) === 0
     && parseDecimal(row.metradoBim) === 0;
 }
 
 export function isLeafOnlyField(fieldName: string | undefined) {
-  return ["costo", "metradoTradicional", "metradoBim", "tipoMetrado", "reglaMetrado"].includes(String(fieldName || ""));
+  return [
+    "costo",
+    "metradoTradicional",
+    "metradoBim",
+    "tipoMetrado",
+    "reglaMetrado",
+    "rendimientoManoObra",
+    "rendimientoEquipos"
+  ].includes(String(fieldName || ""));
 }
 
 export function isLeafValueField(fieldName: string | undefined) {
-  return ["costo", "metradoTradicional", "metradoBim"].includes(String(fieldName || ""));
+  return [
+    "costo",
+    "metradoTradicional",
+    "metradoBim",
+    "rendimientoManoObra",
+    "rendimientoEquipos"
+  ].includes(String(fieldName || ""));
 }
 
 export function isAuditableField(fieldName: string | undefined) {
@@ -528,7 +1062,9 @@ export function isAuditableField(fieldName: string | undefined) {
     "metradoTradicional",
     "metradoBim",
     "tipoMetrado",
-    "reglaMetrado"
+    "reglaMetrado",
+    "rendimientoManoObra",
+    "rendimientoEquipos"
   ].includes(String(fieldName || ""));
 }
 
@@ -538,6 +1074,7 @@ export function sanitizeFieldValue(fieldName: string, value: unknown) {
   if (fieldName === "unidad") return sanitizeUnidadPartida(value);
   if (fieldName === "tipoMetrado") return sanitizeTipoMetrado(value);
   if (fieldName === "reglaMetrado") return sanitizeReglaMetrado(value);
+  if (fieldName === "rendimientoManoObra" || fieldName === "rendimientoEquipos") return normalizeDecimalString(value);
   return String(value ?? "");
 }
 
@@ -616,7 +1153,8 @@ export function createBudgetSnapshot(
   rows: BudgetRow[],
   snapshots: BudgetSnapshot[],
   name: string,
-  operatorName: string
+  operatorName: string,
+  snapshotType: BudgetSnapshot["snapshotType"] = "manual"
 ): BudgetSnapshot {
   const snapshotRows = cloneRows(rows);
   const previousSnapshot = getLatestSnapshot(snapshots);
@@ -626,7 +1164,7 @@ export function createBudgetSnapshot(
     name: sanitizeSnapshotName(name) || getDefaultSnapshotName(),
     rows: snapshotRows,
     summary: buildSnapshotSummary(snapshotRows),
-    snapshotType: "manual",
+    snapshotType: sanitizeSnapshotType(snapshotType),
     baseSnapshotId: previousSnapshot ? previousSnapshot.id : null,
     userName: sanitizeOperatorName(operatorName),
     createdAt: new Date().toISOString()
@@ -870,6 +1408,76 @@ export function buildBimControlReport(rows: BudgetRow[], project: BudgetProject 
   };
 }
 
+export function buildPolynomialBreakdown(
+  rowsInput: BudgetRow[],
+  groupsInput: Array<PolynomialGroupInput | PolynomialGroup> | unknown,
+  resourcesInput: Array<ResourceCatalogInput | ResourceCatalogItem> | unknown
+): PolynomialBreakdownItem[] {
+  const rows = cloneRows(rowsInput);
+  const groups = normalizePolynomialGroups(groupsInput);
+  const resources = normalizeResourceCatalogItems(resourcesInput);
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
+  const fallbackGroupByCategory = new Map<ApuCategory, PolynomialGroup>();
+  APU_CATEGORY_OPTIONS.forEach((option, index) => {
+    fallbackGroupByCategory.set(option.key, {
+      id: `category:${option.key}`,
+      codigo: option.label.slice(0, 3).toUpperCase(),
+      descripcion: option.label,
+      indice: "",
+      categoria: option.key,
+      orden: 1000 + index
+    });
+  });
+
+  const totals = new Map<string, PolynomialBreakdownItem>();
+  const costoDirecto = getGrandTotalForRows(rows);
+  rows.forEach((row, rowIndex) => {
+    if (rowHasChildren(rows, rowIndex)) return;
+    const metrado = parseDecimal(row.metradoTradicional) + parseDecimal(row.metradoBim);
+    normalizeApuItems(row.apuItems).forEach((item) => {
+      const resource = item.resourceId ? resourceById.get(item.resourceId) : null;
+      const configuredGroup = resource?.polynomialGroupId ? groupById.get(resource.polynomialGroupId) : null;
+      const group = configuredGroup || fallbackGroupByCategory.get(item.category)!;
+      const previous = totals.get(group.id) || {
+        groupId: group.id,
+        codigo: group.codigo,
+        descripcion: group.descripcion,
+        indice: group.indice,
+        categoria: group.categoria,
+        costo: 0,
+        incidenciaPercent: 0
+      };
+      previous.costo += getApuItemPartial(item, row) * metrado;
+      totals.set(group.id, previous);
+    });
+  });
+
+  groups.forEach((group) => {
+    if (totals.has(group.id)) return;
+    totals.set(group.id, {
+      groupId: group.id,
+      codigo: group.codigo,
+      descripcion: group.descripcion,
+      indice: group.indice,
+      categoria: group.categoria,
+      costo: 0,
+      incidenciaPercent: 0
+    });
+  });
+
+  return Array.from(totals.values())
+    .map((item) => ({
+      ...item,
+      incidenciaPercent: costoDirecto > 0 ? (item.costo / costoDirecto) * 100 : 0
+    }))
+    .sort((left, right) => {
+      const leftGroup = groupById.get(left.groupId);
+      const rightGroup = groupById.get(right.groupId);
+      return (leftGroup?.orden || 9999) - (rightGroup?.orden || 9999) || left.codigo.localeCompare(right.codigo);
+    });
+}
+
 export function getMissingBimReadyLabels(row: BudgetRow) {
   const missing = [];
   if (!String(row.codificacion || "").trim()) missing.push("Codificacion");
@@ -918,6 +1526,90 @@ export function buildExportRowsForMode(rows: BudgetRow[], rootIndex: number, cod
     });
     return exportRows;
   }, []);
+}
+
+export function buildApuReportRows(rowsInput: BudgetRow[], codes = buildPartidaCodes(rowsInput)) {
+  const rows = cloneRows(rowsInput);
+  return rows.reduce<Array<Record<string, string | number>>>((reportRows, row, rowIndex) => {
+    if (rowHasChildren(rows, rowIndex)) return reportRows;
+    normalizeApuItems(row.apuItems).forEach((item) => {
+      reportRows.push({
+        codigoPartida: codes[rowIndex] || "",
+        codificacion: row.codificacion,
+        partida: row.descripcion,
+        categoria: getApuCategoryLabel(item.category),
+        recurso: item.descripcion,
+        cuadrilla: parseDecimal(item.cuadrilla),
+        unidad: item.unidad,
+        cantidad: getApuItemCantidad(item, row),
+        precioUnitario: parseDecimal(item.precioUnitario),
+        parcial: getApuItemPartial(item, row),
+        rendimientoMo: parseDecimal(row.rendimientoManoObra),
+        rendimientoEq: parseDecimal(row.rendimientoEquipos)
+      });
+    });
+    return reportRows;
+  }, []);
+}
+
+export function buildResourceReportRows(project: BudgetProject) {
+  const rows = cloneRows(project.rows);
+  const resources = normalizeResourceCatalogItems(project.resourceCatalogItems);
+  const groups = normalizePolynomialGroups(project.polynomialGroups);
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  return resources.map((resource) => {
+    const usedCost = rows.reduce((sum, row, rowIndex) => {
+      if (rowHasChildren(rows, rowIndex)) return sum;
+      const metrado = parseDecimal(row.metradoTradicional) + parseDecimal(row.metradoBim);
+      return sum + normalizeApuItems(row.apuItems)
+        .filter((item) => item.resourceId === resource.id)
+        .reduce((resourceSum, item) => resourceSum + (getApuItemPartial(item, row) * metrado), 0);
+    }, 0);
+    const group = resource.polynomialGroupId ? groupById.get(resource.polynomialGroupId) : null;
+    return {
+      categoria: getApuCategoryLabel(resource.category),
+      recurso: resource.descripcion,
+      unidad: resource.unidad,
+      precioUnitario: parseDecimal(resource.precioUnitario),
+      grupoPolinomico: group?.codigo || "",
+      indice: group?.indice || "",
+      costoUsado: usedCost
+    };
+  });
+}
+
+export function buildMetradoReportRows(rowsInput: BudgetRow[], codes = buildPartidaCodes(rowsInput)) {
+  const rows = cloneRows(rowsInput);
+  return rows.reduce<Array<Record<string, string | number>>>((reportRows, row, rowIndex) => {
+    if (rowHasChildren(rows, rowIndex)) return reportRows;
+    normalizeMetradoItems(row.metradoItems).forEach((item) => {
+      reportRows.push({
+        codigoPartida: codes[rowIndex] || "",
+        codificacion: row.codificacion,
+        partida: row.descripcion,
+        descripcion: item.descripcion,
+        veces: parseDecimal(item.veces || "1"),
+        largo: parseDecimal(item.largo),
+        ancho: parseDecimal(item.ancho),
+        alto: parseDecimal(item.alto),
+        parcial: parseDecimal(item.parcial)
+      });
+    });
+    return reportRows;
+  }, []);
+}
+
+export function buildBudgetSummaryReportRows(rows: BudgetRow[], settingsInput: BudgetSettingsInput | BudgetSettings | unknown = DEFAULT_BUDGET_SETTINGS) {
+  const settings = normalizeBudgetSettings(settingsInput);
+  const totals = getBudgetTotals(rows, settings);
+  return [
+    { concepto: "Costo directo", porcentaje: "", importe: totals.costoDirecto },
+    { concepto: "Gastos generales", porcentaje: parseDecimal(settings.gastosGeneralesPercent), importe: totals.gastosGenerales },
+    { concepto: "Utilidad", porcentaje: parseDecimal(settings.utilidadPercent), importe: totals.utilidad },
+    { concepto: "Subtotal", porcentaje: "", importe: totals.subtotal },
+    { concepto: "IGV", porcentaje: settings.includeIgv ? parseDecimal(settings.igvPercent) : 0, importe: totals.igv },
+    { concepto: "Total", porcentaje: "", importe: totals.total }
+  ];
 }
 
 export function getRootExportLabel(row: BudgetRow, code: string) {
@@ -1046,6 +1738,15 @@ export function parseDecimal(value: unknown) {
   const normalized = String(value).replace(/\s+/g, "").replace(",", ".");
   const numeric = Number.parseFloat(normalized);
   return Number.isFinite(numeric) ? numeric : 0;
+}
+
+export function parsePercent(value: unknown) {
+  return parseDecimal(value) / 100;
+}
+
+export function parseMetradoFactor(value: unknown) {
+  if (value === null || value === undefined || value === "") return 1;
+  return parseDecimal(value);
 }
 
 export function normalizeDecimalString(value: unknown) {
@@ -1201,6 +1902,14 @@ export function sanitizeSnapshotName(value: unknown) {
   return sanitizeSingleLine(value).trim().replace(/\s+/g, " ").slice(0, 180);
 }
 
+export function sanitizeSnapshotType(value: unknown): BudgetSnapshot["snapshotType"] {
+  const normalized = normalizeText(value).trim();
+  if (normalized === "venta") return "venta";
+  if (normalized === "meta") return "meta";
+  if (normalized === "linea-base" || normalized === "linea base" || normalized === "lineabase") return "linea-base";
+  return "manual";
+}
+
 export function sanitizeOperatorName(value: unknown) {
   return sanitizeSingleLine(value).trim().replace(/\s+/g, " ").slice(0, 120) || DEFAULT_OPERATOR_NAME;
 }
@@ -1230,9 +1939,23 @@ export function sanitizeUnidadPartida(value: unknown) {
   return sanitizeSingleLine(value).trim();
 }
 
+export function sanitizeUnitCode(value: unknown) {
+  return sanitizeSingleLine(value).trim().replace(/\s+/g, "").slice(0, 30);
+}
+
+export function sanitizeUnitDescription(value: unknown) {
+  return sanitizeSingleLine(value).trim().replace(/\s+/g, " ").slice(0, 180);
+}
+
 export function sanitizeLevel(value: unknown) {
   const numeric = Number.parseInt(String(value), 10);
   if (!Number.isFinite(numeric) || numeric < 0) return 0;
+  return numeric;
+}
+
+export function sanitizeResourceCatalogOrder(value: unknown, index = 0) {
+  const numeric = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(numeric) || numeric < 0) return index + 1;
   return numeric;
 }
 

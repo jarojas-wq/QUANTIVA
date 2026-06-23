@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -13,18 +14,50 @@ import {
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import type {
   AccessUser,
+  ApuCategory,
+  ApuItem,
   AuditEntry,
+  BimJobQueueSummary,
+  BimJobRecord,
   AuditFilterKey,
   BudgetProject,
   BudgetRow,
+  BudgetSettings,
   BudgetSnapshot,
   BudgetState,
+  MetradoItem,
+  PolynomialGroup,
   ProjectAccessOption,
+  ResourceCatalogItem,
   ThemeMode,
+  UnitCatalogItem,
   ViewKey
 } from "../../domain/models";
+import {
+  BIM_JOB_REALTIME_FLUSH_MS,
+  type BimReadinessReport,
+  type BimReadinessTone,
+  canCreateBimApplyJob,
+  canRetryBimJob,
+  getActiveRevitReadinessLabel,
+  getActiveRevitReadinessMissingSummary,
+  getActiveRevitReadinessTone,
+  getBimJobCreateModelIdentityIssue,
+  getBimJobBridgeWaitDiagnostic,
+  getBimJobFluencyMetrics,
+  getBimJobStatusLabel,
+  getBimJobTargetModeLabel,
+  hasBimApplyJobForPreview,
+  isBimJobFinished,
+  normalizeBimJobRecord,
+  resolveActiveRevitJobModelIdentity,
+  selectActiveRevitReadinessVisibleChecks,
+  selectBimJobsForRealtime,
+  upsertBimJobRecord
+} from "../../application/budget/bim-jobs-domain";
 import { useAuth } from "../auth/auth-context";
 import {
+  APU_CATEGORY_OPTIONS,
   AUDIT_FILTER_CONFIGS,
   DEFAULT_OPERATOR_NAME,
   DEFAULT_USER_PROJECT_VIEW_KEYS,
@@ -37,13 +70,21 @@ import {
   USER_ROLE_OPTIONS,
   VIEW_BY_ROUTE,
   VIEW_CONFIGS,
+  type ExportColumnSchema,
   type ViewColumn
 } from "../../application/budget/budget-config";
 import {
+  applyApuTotalToRow,
+  applyResourceToApuItem,
   buildBimControlReport,
+  buildApuReportRows,
   buildBudgetComparison,
+  buildBudgetSummaryReportRows,
   buildExportRowsForMode,
+  buildMetradoReportRows,
   buildPartidaCodes,
+  buildPolynomialBreakdown,
+  buildResourceReportRows,
   buildSnapshotSummary,
   buildUserViewAccessByProject,
   canSessionWriteProject,
@@ -52,19 +93,34 @@ import {
   collectStructureAuditEntries,
   createBudgetSnapshot,
   createDefaultProject,
+  createApuItem,
+  createBudgetSettings,
+  createMetradoItem,
+  createPolynomialGroup,
+  createResourceCatalogItem,
+  createUnitCatalogItem,
   createFieldAuditEntry,
   createRow,
   findDuplicateForField,
+  filterResourceCatalogItems,
   formatAmount,
+  formatUnitCatalogLabel,
   formatDateTime,
   formatShortDate,
   formatSignedAmount,
   formatSignedInteger,
   formatSignedPercent,
+  formatApuItemCantidad,
   getBudgetTimelineVersions,
+  getBudgetTotals,
   getBudgetVersionLabel,
   getDeltaPercent,
   getDeltaToneClass,
+  getApuCategorySubtotal,
+  getApuItemPartial,
+  getApuTotal,
+  getMetradoTotal,
+  getUnitCatalogCodes,
   getDisplayValueForField,
   getDuplicateFieldMessage,
   getFirstAllowedViewKey,
@@ -80,14 +136,22 @@ import {
   getSnapshotsSortedNewestFirst,
   getUserProjectViewKeys,
   getVisibleEntries,
+  hasApuItems,
   insertAtArray,
   isAuditableField,
+  isApuItemCantidadCalculated,
   isHeadingRow,
   isLeafOnlyField,
   isRevitMetradoType,
   moveBranch,
   normalizeAuditEntries,
   normalizeProjectRecord,
+  normalizeApuItems,
+  normalizeBudgetSettings,
+  normalizeMetradoItems,
+  normalizePolynomialGroups,
+  normalizeResourceCatalogItems,
+  normalizeUnitCatalogItems,
   normalizeRows,
   normalizeSnapshots,
   parseDecimal,
@@ -99,12 +163,16 @@ import {
   sanitizeFilename,
   sanitizeOperatorName,
   sanitizeProjectName,
+  sanitizeUnitCode,
+  sanitizeUnitDescription,
   sanitizeSnapshotName,
+  sanitizeSnapshotType,
   restoreAccessUserSnapshot,
   shiftBranch,
   upsertAccessUser
 } from "../../application/budget/budget-domain";
-import { buildXlsxWorkbook, downloadBlobFile } from "../../application/budget/excel-export";
+import { buildXlsxWorkbook, buildXlsxWorkbookFromSheets, downloadBlobFile } from "../../application/budget/excel-export";
+import { applyBimJob, cancelBimJob, createBimJob, getBimJobEventsUrl, loadBimJobQueueSummary, loadBimJobs, loadBimReadiness, retryBimJob } from "../../infrastructure/budget/bim-jobs-repository";
 import { loadBudgetState, saveBudgetState } from "../../infrastructure/budget/state-repository";
 import { loadAccessUsers, saveAccessUser } from "../../infrastructure/budget/users-repository";
 
@@ -121,6 +189,20 @@ interface UsersPanelState {
   search: string;
 }
 
+interface BimJobsPanelState {
+  jobs: BimJobRecord[];
+  summary: BimJobQueueSummary;
+  loading: boolean;
+  creating: boolean;
+  error: string;
+}
+
+interface BimReadinessPanelState {
+  report: BimReadinessReport | null;
+  loading: boolean;
+  error: string;
+}
+
 const emptyUsersState: UsersPanelState = {
   users: [],
   projects: [],
@@ -131,6 +213,73 @@ const emptyUsersState: UsersPanelState = {
   info: "",
   search: ""
 };
+
+const emptyBimJobsState: BimJobsPanelState = {
+  jobs: [],
+  summary: createEmptyBimJobQueueSummary(),
+  loading: false,
+  creating: false,
+  error: ""
+};
+
+const emptyBimReadinessState: BimReadinessPanelState = {
+  report: null,
+  loading: false,
+  error: ""
+};
+
+const NEW_UNIT_SELECT_VALUE = "__new_unit__";
+
+const APU_REPORT_COLUMNS: ExportColumnSchema[] = [
+  { key: "codigoPartida", header: "CODIGO DE PARTIDA", width: 18, type: "text" },
+  { key: "codificacion", header: "CODIFICACION", width: 22, type: "text" },
+  { key: "partida", header: "PARTIDA", width: 46, type: "text" },
+  { key: "categoria", header: "CATEGORIA", width: 18, type: "text" },
+  { key: "recurso", header: "RECURSO", width: 42, type: "text" },
+  { key: "cuadrilla", header: "CUADRILLA", width: 14, type: "number" },
+  { key: "unidad", header: "UNIDAD", width: 14, type: "text" },
+  { key: "cantidad", header: "CANTIDAD", width: 14, type: "number" },
+  { key: "precioUnitario", header: "PRECIO UNITARIO", width: 18, type: "number" },
+  { key: "parcial", header: "PARCIAL", width: 16, type: "number" },
+  { key: "rendimientoMo", header: "RENDIMIENTO MO", width: 18, type: "number" },
+  { key: "rendimientoEq", header: "RENDIMIENTO EQ", width: 18, type: "number" }
+];
+
+const RESOURCE_REPORT_COLUMNS: ExportColumnSchema[] = [
+  { key: "categoria", header: "CATEGORIA", width: 18, type: "text" },
+  { key: "recurso", header: "RECURSO", width: 44, type: "text" },
+  { key: "unidad", header: "UNIDAD", width: 14, type: "text" },
+  { key: "precioUnitario", header: "PRECIO UNITARIO", width: 18, type: "number" },
+  { key: "grupoPolinomico", header: "GRUPO POLINOMICO", width: 22, type: "text" },
+  { key: "indice", header: "INDICE", width: 24, type: "text" },
+  { key: "costoUsado", header: "COSTO USADO", width: 18, type: "number" }
+];
+
+const METRADO_REPORT_COLUMNS: ExportColumnSchema[] = [
+  { key: "codigoPartida", header: "CODIGO DE PARTIDA", width: 18, type: "text" },
+  { key: "codificacion", header: "CODIFICACION", width: 22, type: "text" },
+  { key: "partida", header: "PARTIDA", width: 44, type: "text" },
+  { key: "descripcion", header: "DESCRIPCION METRADO", width: 44, type: "text" },
+  { key: "veces", header: "VECES", width: 12, type: "number" },
+  { key: "largo", header: "LARGO", width: 12, type: "number" },
+  { key: "ancho", header: "ANCHO", width: 12, type: "number" },
+  { key: "alto", header: "ALTO", width: 12, type: "number" },
+  { key: "parcial", header: "PARCIAL", width: 16, type: "number" }
+];
+
+const BUDGET_SUMMARY_REPORT_COLUMNS: ExportColumnSchema[] = [
+  { key: "concepto", header: "CONCEPTO", width: 26, type: "text" },
+  { key: "porcentaje", header: "PORCENTAJE", width: 16, type: "number" },
+  { key: "importe", header: "IMPORTE", width: 18, type: "number" }
+];
+
+const POLYNOMIAL_REPORT_COLUMNS: ExportColumnSchema[] = [
+  { key: "codigo", header: "CODIGO", width: 14, type: "text" },
+  { key: "descripcion", header: "GRUPO", width: 34, type: "text" },
+  { key: "indice", header: "INDICE", width: 24, type: "text" },
+  { key: "costo", header: "COSTO", width: 18, type: "number" },
+  { key: "incidenciaPercent", header: "INCIDENCIA %", width: 16, type: "number" }
+];
 
 export function QuantivaWorkspace() {
   const { session, logout, refreshSession } = useAuth();
@@ -145,10 +294,14 @@ export function QuantivaWorkspace() {
   const [filterQuery, setFilterQuery] = useState("");
   const [auditFilter, setAuditFilter] = useState<AuditFilterKey>("all");
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+  const [expandedApuIds, setExpandedApuIds] = useState<Set<string>>(new Set());
+  const [expandedMetradoIds, setExpandedMetradoIds] = useState<Set<string>>(new Set());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => resolveInitialThemeMode());
   const [accountOpen, setAccountOpen] = useState(false);
   const [usersPanel, setUsersPanel] = useState<UsersPanelState>(emptyUsersState);
+  const [bimJobsPanel, setBimJobsPanel] = useState<BimJobsPanelState>(emptyBimJobsState);
+  const [bimReadinessPanel, setBimReadinessPanel] = useState<BimReadinessPanelState>(emptyBimReadinessState);
   const [snapshotCompareBaseId, setSnapshotCompareBaseId] = useState<string>("");
   const [snapshotCompareTargetId, setSnapshotCompareTargetId] = useState<string>("current");
   const [accessProjectId, setAccessProjectId] = useState("");
@@ -173,6 +326,8 @@ export function QuantivaWorkspace() {
     setLoadError("");
     setSelectedId(selectedProject?.rows[0]?.id || null);
     setCollapsedIds(new Set(selectedProject?.collapsedIds || []));
+    setExpandedApuIds(new Set());
+    setExpandedMetradoIds(new Set());
     setUsersPanel((current) => ({
       ...current,
       selectedProjectId: selectedProject?.id || ""
@@ -214,8 +369,9 @@ export function QuantivaWorkspace() {
         };
         setBudgetState(fallbackState);
         stateRef.current = fallbackState;
-        setSelectedId(fallbackProject.rows[0]?.id || null);
-        setSaveStatus("error");
+      setSelectedId(fallbackProject.rows[0]?.id || null);
+      setExpandedMetradoIds(new Set());
+      setSaveStatus("error");
       });
     return () => {
       cancelled = true;
@@ -248,6 +404,8 @@ export function QuantivaWorkspace() {
     budgetState ? getCurrentProjectFromState(budgetState) : null
   ), [budgetState]);
   const rows = currentProject?.rows || [];
+  const unitCatalogItems = currentProject?.unitCatalogItems || [];
+  const resourceCatalogItems = currentProject?.resourceCatalogItems || [];
   const viewConfig = VIEW_CONFIGS[requestedView] || VIEW_CONFIGS.itemizado;
   const canWriteWorkspace = canSessionWriteProject(session);
   const allowsStructureEditing = viewConfig.allowsStructureEditing && canWriteWorkspace;
@@ -263,12 +421,228 @@ export function QuantivaWorkspace() {
       ? filterQuery
       : "";
     return getVisibleEntries(rows, codes, query, {
-      respectCollapsed: viewConfig.allowsStructureEditing,
+      respectCollapsed: viewConfig.allowsStructureEditing || Boolean(viewConfig.supportsApuExpansion),
       collapsedIds: effectiveCollapsedIds
     });
-  }, [codes, effectiveCollapsedIds, filterQuery, rows, viewConfig.allowsStructureEditing, viewConfig.contentType]);
+  }, [codes, effectiveCollapsedIds, filterQuery, rows, viewConfig.allowsStructureEditing, viewConfig.contentType, viewConfig.supportsApuExpansion]);
   const selectedIndex = rows.findIndex((row) => row.id === selectedId);
   const selectedRow = selectedIndex >= 0 ? rows[selectedIndex] : null;
+  const activeBimJob = bimJobsPanel.jobs.find((job) => !isBimJobFinished(job.status)) || bimJobsPanel.jobs[0] || null;
+  const realtimeBimJobIdsKey = useMemo(() => (
+    selectBimJobsForRealtime(bimJobsPanel.jobs)
+      .map((job) => job.id)
+      .join("|")
+  ), [bimJobsPanel.jobs]);
+
+  const refreshBimJobs = useCallback(() => {
+    if (!currentProject?.id) {
+      setBimJobsPanel(emptyBimJobsState);
+      return;
+    }
+    setBimJobsPanel((current) => ({ ...current, loading: true, error: "" }));
+    void Promise.all([
+      loadBimJobs(currentProject.id),
+      loadBimJobQueueSummary(currentProject.id)
+    ])
+      .then(([jobs, summary]) => {
+        setBimJobsPanel((current) => ({ ...current, jobs, summary, loading: false, error: "" }));
+      })
+      .catch((reason: Error) => {
+        setBimJobsPanel((current) => ({ ...current, loading: false, error: reason.message }));
+      });
+  }, [currentProject?.id]);
+
+  const refreshBimReadiness = useCallback(() => {
+    setBimReadinessPanel((current) => ({ ...current, loading: true, error: "" }));
+    void loadBimReadiness()
+      .then((report) => {
+        setBimReadinessPanel({ report, loading: false, error: "" });
+      })
+      .catch((reason: Error) => {
+        setBimReadinessPanel((current) => ({ ...current, loading: false, error: reason.message }));
+      });
+  }, []);
+
+  useEffect(() => {
+    refreshBimJobs();
+  }, [refreshBimJobs]);
+
+  useEffect(() => {
+    if (requestedView !== "control-bim") return;
+    refreshBimReadiness();
+  }, [refreshBimReadiness, requestedView]);
+
+  useEffect(() => {
+    if (requestedView !== "control-bim" || !currentProject?.id) return;
+    const interval = window.setInterval(refreshBimJobs, 10000);
+    return () => window.clearInterval(interval);
+  }, [currentProject?.id, refreshBimJobs, requestedView]);
+
+  useEffect(() => {
+    const realtimeJobIds = realtimeBimJobIdsKey.split("|").filter(Boolean);
+    if (realtimeJobIds.length === 0) return;
+
+    const sources: EventSource[] = [];
+    const flushTimers = new Map<string, number>();
+    const pendingJobs = new Map<string, BimJobRecord>();
+    const flushPendingJob = (jobId: string) => {
+      const timer = flushTimers.get(jobId);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        flushTimers.delete(jobId);
+      }
+      const nextJob = pendingJobs.get(jobId);
+      pendingJobs.delete(jobId);
+      if (!nextJob) return;
+      setBimJobsPanel((current) => ({
+        ...current,
+        jobs: upsertBimJobRecord(current.jobs, nextJob)
+      }));
+    };
+
+    realtimeJobIds.forEach((jobId) => {
+      const source = new EventSource(getBimJobEventsUrl(jobId));
+      sources.push(source);
+      source.addEventListener("job", (event) => {
+        const payload = JSON.parse((event as MessageEvent).data) as { job?: BimJobRecord };
+        if (!payload.job) return;
+        const nextJob = normalizeBimJobRecord(payload.job);
+        pendingJobs.set(jobId, nextJob);
+        if (isBimJobFinished(nextJob.status)) {
+          flushPendingJob(jobId);
+          return;
+        }
+        if (!flushTimers.has(jobId)) {
+          flushTimers.set(jobId, window.setTimeout(() => flushPendingJob(jobId), BIM_JOB_REALTIME_FLUSH_MS));
+        }
+      });
+      source.addEventListener("ping", () => undefined);
+      source.addEventListener("error", (event) => {
+        const data = (event as MessageEvent).data;
+        if (!data) {
+          return;
+        }
+        try {
+          const payload = JSON.parse(data) as { error?: string };
+          if (payload.error) {
+            setBimJobsPanel((current) => ({ ...current, error: payload.error || current.error }));
+          }
+        } catch {
+          setBimJobsPanel((current) => ({ ...current, error: "Se perdio la transmision del job BIM." }));
+        }
+        source.close();
+      });
+    });
+
+    return () => {
+      sources.forEach((source) => source.close());
+      flushTimers.forEach((timer) => window.clearTimeout(timer));
+      flushTimers.clear();
+      pendingJobs.clear();
+    };
+  }, [realtimeBimJobIdsKey]);
+
+  const handleCreateActiveRevitJob = useCallback(() => {
+    if (!currentProject?.id) return;
+    const targetMode = "active-revit";
+    const commandType = "active-revit-preview";
+    const modelIdentity = resolveActiveRevitJobModelIdentity({
+      projectName: currentProject.name,
+      latestRevitExport: currentProject.latestRevitExport,
+      bridgePresence: bimJobsPanel.summary.bridgePresence,
+    });
+    const identityIssue = getBimJobCreateModelIdentityIssue(targetMode, commandType, modelIdentity);
+    if (identityIssue) {
+      setBimJobsPanel((current) => ({ ...current, creating: false, error: identityIssue }));
+      return;
+    }
+    setBimJobsPanel((current) => ({ ...current, creating: true, error: "" }));
+    void createBimJob({
+      projectId: currentProject.id,
+      targetMode,
+      commandType,
+      payload: {
+        batchSize: 250,
+        mode: "analyze-before-apply",
+        source: "control-bim"
+      },
+      modelIdentity
+    })
+      .then((job) => {
+        setBimJobsPanel((current) => ({
+          ...current,
+          creating: false,
+          jobs: upsertBimJobRecord(current.jobs, job)
+        }));
+        void refreshBimJobs();
+      })
+      .catch((reason: Error) => {
+        setBimJobsPanel((current) => ({ ...current, creating: false, error: reason.message }));
+      });
+  }, [bimJobsPanel.summary.bridgePresence, currentProject?.id, currentProject?.latestRevitExport, currentProject?.name, refreshBimJobs]);
+
+  const handleCancelBimJob = useCallback((jobId: string) => {
+    setBimJobsPanel((current) => ({ ...current, error: "" }));
+    void cancelBimJob(jobId)
+      .then((job) => {
+        setBimJobsPanel((current) => ({
+          ...current,
+          jobs: upsertBimJobRecord(current.jobs, job)
+        }));
+        void refreshBimJobs();
+      })
+      .catch((reason: Error) => {
+        setBimJobsPanel((current) => ({ ...current, error: reason.message }));
+      });
+  }, [refreshBimJobs]);
+
+  const handleRetryBimJob = useCallback((jobId: string) => {
+    setBimJobsPanel((current) => ({ ...current, creating: true, error: "" }));
+    void retryBimJob(jobId)
+      .then((job) => {
+        setBimJobsPanel((current) => ({
+          ...current,
+          creating: false,
+          jobs: upsertBimJobRecord(current.jobs, job)
+        }));
+        void refreshBimJobs();
+      })
+      .catch((reason: Error) => {
+        setBimJobsPanel((current) => ({ ...current, creating: false, error: reason.message }));
+      });
+  }, [refreshBimJobs]);
+
+  const handleApplyBimJob = useCallback((jobId: string) => {
+    if (!window.confirm("Se creara un job de aplicacion en Revit desde este preview completado. Revit lo tomara por lotes y seguira reportando progreso. Deseas continuar?")) {
+      return;
+    }
+    setBimJobsPanel((current) => ({ ...current, creating: true, error: "" }));
+    void applyBimJob(jobId)
+      .then((job) => {
+        setBimJobsPanel((current) => ({
+          ...current,
+          creating: false,
+          jobs: upsertBimJobRecord(current.jobs, job)
+        }));
+        void refreshBimJobs();
+      })
+      .catch((reason: Error) => {
+        setBimJobsPanel((current) => ({ ...current, creating: false, error: reason.message }));
+      });
+  }, [refreshBimJobs]);
+
+  useEffect(() => {
+    setExpandedApuIds((current) => {
+      const leafIds = new Set(rows.filter((_, index) => !rowHasChildren(rows, index)).map((row) => row.id));
+      const nextIds = Array.from(current).filter((rowId) => leafIds.has(rowId));
+      return nextIds.length === current.size ? current : new Set(nextIds);
+    });
+    setExpandedMetradoIds((current) => {
+      const leafIds = new Set(rows.filter((_, index) => !rowHasChildren(rows, index)).map((row) => row.id));
+      const nextIds = Array.from(current).filter((rowId) => leafIds.has(rowId));
+      return nextIds.length === current.size ? current : new Set(nextIds);
+    });
+  }, [rows]);
 
   useEffect(() => {
     if (rows.length === 0) return;
@@ -515,12 +889,247 @@ export function QuantivaWorkspace() {
     delete editStartValuesRef.current[key];
   };
 
+  const updateApuItemsForRow = useCallback((rowId: string, updater: (items: ApuItem[]) => ApuItem[]) => {
+    const rowIndex = rows.findIndex((row) => row.id === rowId);
+    if (rowIndex === -1 || rowHasChildren(rows, rowIndex)) return;
+    const nextRows = rows.map((entry) => {
+      if (entry.id !== rowId) return entry;
+      const nextApuItems = normalizeApuItems(updater(entry.apuItems || []));
+      return applyApuTotalToRow({
+        ...entry,
+        apuItems: nextApuItems
+      });
+    });
+    updateCurrentProject((project) => ({
+      ...project,
+      rows: cloneRows(nextRows),
+      updatedAt: new Date().toISOString()
+    }));
+  }, [rows, updateCurrentProject]);
+
+  const toggleApuExpansion = useCallback((rowId: string) => {
+    setExpandedApuIds((current) => {
+      const next = new Set(current);
+      if (next.has(rowId)) next.delete(rowId);
+      else next.add(rowId);
+      return next;
+    });
+  }, []);
+
+  const addApuItem = useCallback((rowId: string, category: ApuCategory) => {
+    updateApuItemsForRow(rowId, (items) => [
+      ...items,
+      createApuItem({ category })
+    ]);
+    setExpandedApuIds((current) => {
+      const next = new Set(current);
+      next.add(rowId);
+      return next;
+    });
+  }, [updateApuItemsForRow]);
+
+  const updateApuItem = useCallback((rowId: string, itemId: string, fieldName: keyof ApuItem, value: string) => {
+    updateApuItemsForRow(rowId, (items) => items.map((item) => (
+      item.id === itemId
+        ? {
+          ...item,
+          [fieldName]: value,
+          resourceId: fieldName === "cantidad" || fieldName === "cuadrilla" || fieldName === "resourceId" ? item.resourceId : "",
+          subpartidaId: fieldName === "subpartidaId"
+            ? value
+            : fieldName === "cantidad" || fieldName === "cuadrilla"
+              ? item.subpartidaId
+              : ""
+        }
+        : item
+    )));
+  }, [updateApuItemsForRow]);
+
+  const selectApuResource = useCallback((rowId: string, itemId: string, resourceId: string) => {
+    const resource = resourceCatalogItems.find((item) => item.id === resourceId);
+    if (!resource) return;
+    updateApuItemsForRow(rowId, (items) => items.map((item) => (
+      item.id === itemId ? applyResourceToApuItem(item, resource) : item
+    )));
+  }, [resourceCatalogItems, updateApuItemsForRow]);
+
+  const removeApuItem = useCallback((rowId: string, itemId: string) => {
+    updateApuItemsForRow(rowId, (items) => items.filter((item) => item.id !== itemId));
+  }, [updateApuItemsForRow]);
+
+  const updateMetradoItemsForRow = useCallback((rowId: string, updater: (items: MetradoItem[]) => MetradoItem[]) => {
+    const rowIndex = rows.findIndex((row) => row.id === rowId);
+    if (rowIndex === -1 || rowHasChildren(rows, rowIndex)) return;
+    const nextRows = rows.map((entry) => {
+      if (entry.id !== rowId) return entry;
+      return {
+        ...entry,
+        metradoItems: normalizeMetradoItems(updater(entry.metradoItems || []))
+      };
+    });
+    updateCurrentProject((project) => ({
+      ...project,
+      rows: cloneRows(nextRows),
+      updatedAt: new Date().toISOString()
+    }));
+  }, [rows, updateCurrentProject]);
+
+  const toggleMetradoExpansion = useCallback((rowId: string) => {
+    setExpandedMetradoIds((current) => {
+      const next = new Set(current);
+      if (next.has(rowId)) next.delete(rowId);
+      else next.add(rowId);
+      return next;
+    });
+  }, []);
+
+  const addMetradoItem = useCallback((rowId: string) => {
+    updateMetradoItemsForRow(rowId, (items) => [
+      ...items,
+      createMetradoItem({ veces: "1" })
+    ]);
+    setExpandedMetradoIds((current) => {
+      const next = new Set(current);
+      next.add(rowId);
+      return next;
+    });
+  }, [updateMetradoItemsForRow]);
+
+  const updateMetradoItem = useCallback((rowId: string, itemId: string, fieldName: keyof MetradoItem, value: string) => {
+    updateMetradoItemsForRow(rowId, (items) => items.map((item) => (
+      item.id === itemId ? { ...item, [fieldName]: value } : item
+    )));
+  }, [updateMetradoItemsForRow]);
+
+  const removeMetradoItem = useCallback((rowId: string, itemId: string) => {
+    updateMetradoItemsForRow(rowId, (items) => items.filter((item) => item.id !== itemId));
+  }, [updateMetradoItemsForRow]);
+
+  const updateBudgetSettings = useCallback((settings: BudgetSettings) => {
+    updateCurrentProject((project) => ({
+      ...project,
+      budgetSettings: normalizeBudgetSettings(settings),
+      updatedAt: new Date().toISOString()
+    }));
+  }, [updateCurrentProject]);
+
+  const addPolynomialGroup = useCallback(() => {
+    updateCurrentProject((project) => {
+      const groups = normalizePolynomialGroups(project.polynomialGroups);
+      const nextOrder = groups.reduce((max, group) => Math.max(max, group.orden), 0) + 1;
+      return {
+        ...project,
+        polynomialGroups: normalizePolynomialGroups([
+          ...groups,
+          createPolynomialGroup({ codigo: `G${nextOrder}`, descripcion: `Grupo ${nextOrder}`, orden: nextOrder })
+        ]),
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }, [updateCurrentProject]);
+
+  const updatePolynomialGroup = useCallback((groupId: string, fieldName: keyof PolynomialGroup, value: string) => {
+    updateCurrentProject((project) => ({
+      ...project,
+      polynomialGroups: normalizePolynomialGroups(project.polynomialGroups).map((group) => (
+        group.id === groupId
+          ? normalizePolynomialGroups([{ ...group, [fieldName]: value }])[0]
+          : group
+      )),
+      updatedAt: new Date().toISOString()
+    }));
+  }, [updateCurrentProject]);
+
+  const removePolynomialGroup = useCallback((groupId: string) => {
+    updateCurrentProject((project) => ({
+      ...project,
+      polynomialGroups: normalizePolynomialGroups(project.polynomialGroups).filter((group) => group.id !== groupId),
+      resourceCatalogItems: normalizeResourceCatalogItems(project.resourceCatalogItems).map((resource) => (
+        resource.polynomialGroupId === groupId ? { ...resource, polynomialGroupId: "" } : resource
+      )),
+      updatedAt: new Date().toISOString()
+    }));
+  }, [updateCurrentProject]);
+
+  const addResourceCatalogItem = useCallback((category: ApuCategory) => {
+    updateCurrentProject((project) => {
+      const currentItems = normalizeResourceCatalogItems(project.resourceCatalogItems);
+      const categoryItems = currentItems.filter((item) => item.category === category);
+      const nextOrder = categoryItems.reduce((max, item) => Math.max(max, item.orden), 0) + 1;
+      return {
+        ...project,
+        resourceCatalogItems: normalizeResourceCatalogItems([
+          ...currentItems,
+          createResourceCatalogItem({ category, orden: nextOrder })
+        ]),
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }, [updateCurrentProject]);
+
+  const updateResourceCatalogItem = useCallback((resourceId: string, fieldName: keyof ResourceCatalogItem, value: string) => {
+    updateCurrentProject((project) => {
+      const nextItems = normalizeResourceCatalogItems(project.resourceCatalogItems).map((item) => (
+        item.id === resourceId
+          ? normalizeResourceCatalogItems([{ ...item, [fieldName]: value }])[0]
+          : item
+      ));
+      return {
+        ...project,
+        resourceCatalogItems: normalizeResourceCatalogItems(nextItems),
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }, [updateCurrentProject]);
+
+  const removeResourceCatalogItem = useCallback((resourceId: string) => {
+    updateCurrentProject((project) => ({
+      ...project,
+      resourceCatalogItems: normalizeResourceCatalogItems(project.resourceCatalogItems)
+        .filter((item) => item.id !== resourceId),
+      updatedAt: new Date().toISOString()
+    }));
+  }, [updateCurrentProject]);
+
+  const createUnitFromPrompt = useCallback(() => {
+    const codigo = sanitizeUnitCode(window.prompt("Abreviatura de la unidad. Ejemplo: h", "") || "");
+    if (!codigo) {
+      window.alert("Ingresa una abreviatura valida para la unidad.");
+      return "";
+    }
+    const descripcion = sanitizeUnitDescription(window.prompt(`Que significa "${codigo}"?`, "") || "");
+    if (!descripcion) {
+      window.alert("Para crear una unidad debes indicar que significa.");
+      return "";
+    }
+    const currentItems = normalizeUnitCatalogItems(currentProject?.unitCatalogItems);
+    if (currentItems.some((item) => item.codigo.trim().toLowerCase() === codigo.toLowerCase())) {
+      window.alert(`La unidad "${codigo}" ya existe.`);
+      return "";
+    }
+    const nextOrder = currentItems.reduce((max, item) => Math.max(max, item.orden), 0) + 1;
+    const unit = createUnitCatalogItem({ codigo, descripcion, orden: nextOrder });
+    updateCurrentProject((project) => {
+      return {
+        ...project,
+        unitCatalogItems: normalizeUnitCatalogItems([
+          ...project.unitCatalogItems,
+          unit
+        ]),
+        updatedAt: new Date().toISOString()
+      };
+    });
+    return unit.codigo;
+  }, [currentProject?.unitCatalogItems, updateCurrentProject]);
+
   const switchProject = (projectId: string) => {
     if (!budgetState || projectId === budgetState.currentProjectId) return;
     const nextProject = budgetState.projects.find((project) => project.id === projectId);
     if (!nextProject) return;
     setSelectedId(nextProject.rows[0]?.id || null);
     setCollapsedIds(new Set(nextProject.collapsedIds || []));
+    setExpandedApuIds(new Set());
+    setExpandedMetradoIds(new Set());
     setFilterQuery("");
     setUsersPanel((current) => ({ ...current, selectedProjectId: projectId }));
     updateBudget((current) => ({
@@ -544,6 +1153,8 @@ export function QuantivaWorkspace() {
     const project = createDefaultProject(name);
     setSelectedId(project.rows[0]?.id || null);
     setCollapsedIds(new Set());
+    setExpandedApuIds(new Set());
+    setExpandedMetradoIds(new Set());
     setAccessProjectId(project.id);
     setUsersPanel((current) => ({
       ...current,
@@ -586,6 +1197,8 @@ export function QuantivaWorkspace() {
     const nextProject = nextProjects[Math.min(currentIndex, nextProjects.length - 1)] || nextProjects[0];
     setSelectedId(nextProject.rows[0]?.id || null);
     setCollapsedIds(new Set(nextProject.collapsedIds || []));
+    setExpandedApuIds(new Set());
+    setExpandedMetradoIds(new Set());
     updateBudget(() => ({
       ...budgetState,
       currentProjectId: nextProject.id,
@@ -593,12 +1206,20 @@ export function QuantivaWorkspace() {
     }));
   };
 
-  const createSnapshot = () => {
+  const createSnapshot = (snapshotType: BudgetSnapshot["snapshotType"] = "manual") => {
     if (!canWriteWorkspace || !currentProject) return;
-    const suggestedName = `Foto ${new Date().toLocaleDateString("es-PE")}`;
-    const input = window.prompt("Nombre de la foto del presupuesto", suggestedName);
+    const normalizedType = sanitizeSnapshotType(snapshotType);
+    const typeLabel = getSnapshotTypeLabel(normalizedType);
+    const suggestedName = `${typeLabel} ${new Date().toLocaleDateString("es-PE")}`;
+    const input = window.prompt(`Nombre de la version ${typeLabel.toLowerCase()}`, suggestedName);
     if (input === null) return;
-    const snapshot = createBudgetSnapshot(rows, currentProject.snapshots, sanitizeSnapshotName(input) || suggestedName, operatorName);
+    const snapshot = createBudgetSnapshot(
+      rows,
+      currentProject.snapshots,
+      sanitizeSnapshotName(input) || suggestedName,
+      operatorName,
+      normalizedType
+    );
     updateCurrentProject((project) => ({
       ...project,
       snapshots: normalizeSnapshots([snapshot, ...project.snapshots]),
@@ -721,7 +1342,9 @@ export function QuantivaWorkspace() {
                   id="table-search-input"
                   type="text"
                   value={filterQuery}
-                  placeholder="Buscar por codigo, codificacion o descripcion"
+                  placeholder={viewConfig.contentType === "resources"
+                    ? "Buscar recurso, unidad o precio"
+                    : "Buscar por codigo, codificacion o descripcion"}
                   onChange={(event) => setFilterQuery(event.target.value.trimStart())}
                 />
               </div>
@@ -729,9 +1352,16 @@ export function QuantivaWorkspace() {
 
             <div className="topbar-actions">
               {requestedView === "presupuesto" && canWriteWorkspace && (
-                <button id="save-snapshot-button" type="button" className="topbar-button" onClick={createSnapshot}>
+                <button id="save-snapshot-button" type="button" className="topbar-button" onClick={() => createSnapshot()}>
                   Guardar foto
                 </button>
+              )}
+              {requestedView === "presupuesto" && canWriteWorkspace && (
+                <>
+                  <button type="button" className="topbar-button" onClick={() => createSnapshot("linea-base")}>Linea base</button>
+                  <button type="button" className="topbar-button" onClick={() => createSnapshot("meta")}>Meta</button>
+                  <button type="button" className="topbar-button" onClick={() => createSnapshot("venta")}>Venta</button>
+                </>
               )}
               <button
                 id="sync-now-button"
@@ -842,24 +1472,49 @@ export function QuantivaWorkspace() {
 
               {viewConfig.contentType === "table" || viewConfig.contentType === "audit" ? (
                 <>
+                  {requestedView === "presupuesto" && currentProject && (
+                    <BudgetSummaryPanel
+                      canEdit={canWriteWorkspace}
+                      settings={currentProject.budgetSettings}
+                      totals={getBudgetTotals(rows, currentProject.budgetSettings)}
+                      onChange={updateBudgetSettings}
+                    />
+                  )}
                   <BudgetTable
                     collapsedIds={effectiveCollapsedIds}
                     codes={codes}
+                    canEditApu={canWriteWorkspace}
+                    expandedApuIds={expandedApuIds}
+                    expandedMetradoIds={expandedMetradoIds}
+                    resourceCatalogItems={resourceCatalogItems}
                     rows={rows}
                     selectedId={selectedId}
+                    supportsApuExpansion={Boolean(viewConfig.supportsApuExpansion)}
+                    supportsMetradoExpansion={Boolean(viewConfig.supportsMetradoExpansion)}
+                    unitCatalogItems={unitCatalogItems}
                     viewColumns={viewColumns}
                     visibleEntries={visibleEntries}
                     allowsStructureEditing={allowsStructureEditing}
+                    onAddApuItem={addApuItem}
+                    onAddMetradoItem={addMetradoItem}
                     onFieldBlur={(rowId, fieldName) => finalizeRowField(rowId, fieldName)}
                     onFieldChange={updateRowField}
                     onFieldFocus={handleFieldFocus}
+                    onRemoveMetradoItem={removeMetradoItem}
+                    onRemoveApuItem={removeApuItem}
                     onSelectRow={setSelectedId}
+                    onSelectApuResource={selectApuResource}
+                    onCreateUnit={createUnitFromPrompt}
+                    onToggleApu={toggleApuExpansion}
+                    onToggleMetrado={toggleMetradoExpansion}
                     onToggleCollapse={(rowId) => {
                       const next = new Set(effectiveCollapsedIds);
                       if (next.has(rowId)) next.delete(rowId);
                       else next.add(rowId);
                       persistCollapsedIds(next);
                     }}
+                    onUpdateApuItem={updateApuItem}
+                    onUpdateMetradoItem={updateMetradoItem}
                   />
                   {viewConfig.contentType === "audit" && (
                     <AuditPanel
@@ -893,6 +1548,30 @@ export function QuantivaWorkspace() {
                 </>
               ) : null}
 
+              {viewConfig.contentType === "resources" && currentProject && (
+                <ResourceCatalogPanel
+                  canEdit={canWriteWorkspace}
+                  filterQuery={filterQuery}
+                  items={resourceCatalogItems}
+                  polynomialGroups={currentProject.polynomialGroups}
+                  unitCatalogItems={unitCatalogItems}
+                  onAddItem={addResourceCatalogItem}
+                  onCreateUnit={createUnitFromPrompt}
+                  onRemoveItem={removeResourceCatalogItem}
+                  onUpdateItem={updateResourceCatalogItem}
+                />
+              )}
+
+              {viewConfig.contentType === "polynomial" && currentProject && (
+                <PolynomialPanel
+                  canEdit={canWriteWorkspace}
+                  currentProject={currentProject}
+                  onAddGroup={addPolynomialGroup}
+                  onRemoveGroup={removePolynomialGroup}
+                  onUpdateGroup={updatePolynomialGroup}
+                />
+              )}
+
               {viewConfig.contentType === "export" && currentProject && (
                 <ExportPanel
                   codes={codes}
@@ -906,6 +1585,15 @@ export function QuantivaWorkspace() {
                   currentProject={currentProject}
                   rows={rows}
                   codes={codes}
+                  jobsState={bimJobsPanel}
+                  readinessState={bimReadinessPanel}
+                  canCreateJob={canWriteWorkspace}
+                  onCancelJob={handleCancelBimJob}
+                  onCreateJob={handleCreateActiveRevitJob}
+                  onApplyJob={handleApplyBimJob}
+                  onRefreshJobs={refreshBimJobs}
+                  onRefreshReadiness={refreshBimReadiness}
+                  onRetryJob={handleRetryBimJob}
                   onOpenRvtExport={() => navigate(ROUTE_BY_VIEW["exportaciones-rvt"])}
                   onSelectRow={(rowId) => {
                     setSelectedId(rowId);
@@ -1175,17 +1863,34 @@ function TopbarProjectSwitcher(props: {
 
 function BudgetTable(props: {
   allowsStructureEditing: boolean;
+  canEditApu: boolean;
   collapsedIds: Set<string>;
   codes: string[];
+  expandedApuIds: Set<string>;
+  expandedMetradoIds: Set<string>;
+  resourceCatalogItems: ResourceCatalogItem[];
   rows: BudgetRow[];
   selectedId: string | null;
+  supportsApuExpansion: boolean;
+  supportsMetradoExpansion: boolean;
+  unitCatalogItems: UnitCatalogItem[];
   viewColumns: ViewColumn[];
   visibleEntries: Array<{ row: BudgetRow; index: number; code: string }>;
+  onAddApuItem: (rowId: string, category: ApuCategory) => void;
+  onAddMetradoItem: (rowId: string) => void;
   onFieldBlur: (rowId: string, fieldName: string) => void;
   onFieldChange: (rowId: string, fieldName: string, value: string, auditNow?: boolean) => void;
   onFieldFocus: (event: FocusEvent<HTMLInputElement | HTMLSelectElement>, rowId: string) => void;
+  onRemoveMetradoItem: (rowId: string, itemId: string) => void;
+  onRemoveApuItem: (rowId: string, itemId: string) => void;
   onSelectRow: (rowId: string) => void;
+  onSelectApuResource: (rowId: string, itemId: string, resourceId: string) => void;
+  onCreateUnit: () => string;
+  onToggleApu: (rowId: string) => void;
+  onToggleMetrado: (rowId: string) => void;
   onToggleCollapse: (rowId: string) => void;
+  onUpdateApuItem: (rowId: string, itemId: string, fieldName: keyof ApuItem, value: string) => void;
+  onUpdateMetradoItem: (rowId: string, itemId: string, fieldName: keyof MetradoItem, value: string) => void;
 }) {
   return (
     <div className="table-wrap">
@@ -1217,31 +1922,72 @@ function BudgetTable(props: {
               row.id === props.selectedId ? "is-selected" : "",
               isHeadingRow(props.rows, row, index) ? `is-heading-row is-heading-level-${Math.min(row.level, 4)}` : ""
             ].filter(Boolean).join(" ");
+            const isLeaf = !rowHasChildren(props.rows, index);
+            const isApuExpanded = props.supportsApuExpansion && isLeaf && props.expandedApuIds.has(row.id);
+            const isMetradoExpanded = props.supportsMetradoExpansion && isLeaf && props.expandedMetradoIds.has(row.id);
             return (
-              <tr
-                key={row.id}
-                data-row-id={row.id}
-                className={classes}
-                title={row.codificacion.trim() || "Sin codificacion"}
-                onClick={() => props.onSelectRow(row.id)}
-              >
-                {props.viewColumns.map((column) => (
-                  <BudgetCell
-                    key={column.key}
-                    allowsStructureEditing={props.allowsStructureEditing}
+              <Fragment key={row.id}>
+                <tr
+                  data-row-id={row.id}
+                  className={classes}
+                  title={row.codificacion.trim() || "Sin codificacion"}
+                  onClick={() => props.onSelectRow(row.id)}
+                >
+                  {props.viewColumns.map((column) => (
+                    <BudgetCell
+                      key={column.key}
+                      allowsStructureEditing={props.allowsStructureEditing}
+                      code={code}
+                      collapsedIds={props.collapsedIds}
+                      column={column}
+                      expandedApuIds={props.expandedApuIds}
+                      expandedMetradoIds={props.expandedMetradoIds}
+                      row={row}
+                      rowIndex={index}
+                      rows={props.rows}
+                      supportsApuExpansion={props.supportsApuExpansion}
+                      supportsMetradoExpansion={props.supportsMetradoExpansion}
+                      unitCatalogItems={props.unitCatalogItems}
+                      onFieldBlur={props.onFieldBlur}
+                      onFieldChange={props.onFieldChange}
+                      onFieldFocus={props.onFieldFocus}
+                      onToggleApu={props.onToggleApu}
+                      onToggleMetrado={props.onToggleMetrado}
+                      onToggleCollapse={props.onToggleCollapse}
+                    />
+                  ))}
+                </tr>
+                {isMetradoExpanded && (
+                  <MetradoDetailRow
+                    canEdit={props.canEditApu}
                     code={code}
-                    collapsedIds={props.collapsedIds}
-                    column={column}
+                    colSpan={props.viewColumns.length}
                     row={row}
-                    rowIndex={index}
+                    onAddItem={props.onAddMetradoItem}
+                    onRemoveItem={props.onRemoveMetradoItem}
+                    onUpdateItem={props.onUpdateMetradoItem}
+                  />
+                )}
+                {isApuExpanded && (
+                  <ApuDetailRow
+                    canEdit={props.canEditApu}
+                    code={code}
+                    colSpan={props.viewColumns.length}
+                    resourceCatalogItems={props.resourceCatalogItems}
+                    row={row}
                     rows={props.rows}
+                    unitCatalogItems={props.unitCatalogItems}
+                    onAddItem={props.onAddApuItem}
+                    onRemoveItem={props.onRemoveApuItem}
+                    onCreateUnit={props.onCreateUnit}
+                    onSelectResource={props.onSelectApuResource}
                     onFieldBlur={props.onFieldBlur}
                     onFieldChange={props.onFieldChange}
                     onFieldFocus={props.onFieldFocus}
-                    onToggleCollapse={props.onToggleCollapse}
+                    onUpdateItem={props.onUpdateApuItem}
                   />
-                ))}
-              </tr>
+                )}
+              </Fragment>
             );
           })}
         </tbody>
@@ -1255,31 +2001,52 @@ function BudgetCell(props: {
   code: string;
   collapsedIds: Set<string>;
   column: ViewColumn;
+  expandedApuIds: Set<string>;
+  expandedMetradoIds: Set<string>;
   row: BudgetRow;
   rowIndex: number;
   rows: BudgetRow[];
+  supportsApuExpansion: boolean;
+  supportsMetradoExpansion: boolean;
+  unitCatalogItems: UnitCatalogItem[];
   onFieldBlur: (rowId: string, fieldName: string) => void;
   onFieldChange: (rowId: string, fieldName: string, value: string, auditNow?: boolean) => void;
   onFieldFocus: (event: FocusEvent<HTMLInputElement | HTMLSelectElement>, rowId: string) => void;
+  onToggleApu: (rowId: string) => void;
+  onToggleMetrado: (rowId: string) => void;
   onToggleCollapse: (rowId: string) => void;
 }) {
   if (props.column.type === "partida") {
     const hasChildren = rowHasChildren(props.rows, props.rowIndex);
-    const isCollapsed = props.collapsedIds.has(props.row.id);
+    const canToggleBranch = hasChildren && (props.allowsStructureEditing || props.supportsApuExpansion);
+    const canToggleApu = props.supportsApuExpansion && !hasChildren;
+    const canToggleMetrado = props.supportsMetradoExpansion && !hasChildren;
+    const isCollapsed = hasChildren
+      ? props.collapsedIds.has(props.row.id)
+      : canToggleMetrado
+        ? !props.expandedMetradoIds.has(props.row.id)
+        : !props.expandedApuIds.has(props.row.id);
+    const toggleLabel = hasChildren
+      ? (isCollapsed ? "Expandir subpartidas" : "Contraer subpartidas")
+      : canToggleMetrado
+        ? (isCollapsed ? "Mostrar hoja de metrado" : "Ocultar hoja de metrado")
+        : (isCollapsed ? "Mostrar APU" : "Ocultar APU");
     return (
       <td className="partida-cell">
         <div className="partida-chip" style={{ "--depth": props.row.level } as CSSProperties}>
           {props.allowsStructureEditing && <span className="drag-handle" aria-hidden="true"></span>}
-          {props.allowsStructureEditing && hasChildren ? (
+          {canToggleBranch || canToggleApu || canToggleMetrado ? (
             <button
               type="button"
               className={`tree-toggle${isCollapsed ? " is-collapsed" : ""}`}
-              aria-label={isCollapsed ? "Expandir subpartidas" : "Contraer subpartidas"}
+              aria-label={toggleLabel}
               aria-expanded={!isCollapsed}
-              title={isCollapsed ? "Expandir subpartidas" : "Contraer subpartidas"}
+              title={toggleLabel}
               onClick={(event) => {
                 event.stopPropagation();
-                props.onToggleCollapse(props.row.id);
+                if (hasChildren) props.onToggleCollapse(props.row.id);
+                else if (canToggleMetrado) props.onToggleMetrado(props.row.id);
+                else props.onToggleApu(props.row.id);
               }}
             ></button>
           ) : (
@@ -1314,7 +2081,9 @@ function BudgetCell(props: {
   ].filter(Boolean).join(" ");
 
   if (props.column.type === "select") {
-    const options = props.column.options || [];
+    const options = props.column.field === "unidad"
+      ? getUnitCatalogCodes(props.unitCatalogItems)
+      : props.column.options || [];
     const renderedOptions = displayValue && !options.includes(displayValue)
       ? [displayValue, ...options]
       : options;
@@ -1333,7 +2102,9 @@ function BudgetCell(props: {
         >
           <option value="">{props.column.placeholder || "Selecciona"}</option>
           {renderedOptions.map((option) => (
-            <option key={option} value={option}>{option}</option>
+            <option key={option} value={option}>
+              {props.column.field === "unidad" ? formatUnitCatalogLabel(option, props.unitCatalogItems) : option}
+            </option>
           ))}
         </select>
       </td>
@@ -1357,6 +2128,793 @@ function BudgetCell(props: {
         onBlur={() => props.onFieldBlur(props.row.id, fieldName)}
       />
     </td>
+  );
+}
+
+function BudgetSummaryPanel(props: {
+  canEdit: boolean;
+  settings: BudgetSettings;
+  totals: ReturnType<typeof getBudgetTotals>;
+  onChange: (settings: BudgetSettings) => void;
+}) {
+  const settings = createBudgetSettings(props.settings);
+  const update = (patch: Partial<BudgetSettings>) => props.onChange(createBudgetSettings({
+    ...settings,
+    ...patch
+  }));
+  return (
+    <section className="budget-summary-panel" aria-label="Pie de presupuesto">
+      <div className="budget-summary-grid">
+        <BudgetSummaryMetric label="Costo directo" value={formatAmount(props.totals.costoDirecto)} />
+        <BudgetSummaryMetric label="Gastos generales" value={formatAmount(props.totals.gastosGenerales)} />
+        <BudgetSummaryMetric label="Utilidad" value={formatAmount(props.totals.utilidad)} />
+        <BudgetSummaryMetric label="Subtotal" value={formatAmount(props.totals.subtotal)} />
+        <BudgetSummaryMetric label="IGV" value={formatAmount(props.totals.igv)} />
+        <BudgetSummaryMetric label="Total" value={formatAmount(props.totals.total)} strong />
+      </div>
+      <div className="budget-settings-row">
+        <label className="budget-setting-field">
+          <span>GG %</span>
+          <input
+            className="cell-field"
+            type="text"
+            inputMode="decimal"
+            value={settings.gastosGeneralesPercent}
+            readOnly={!props.canEdit}
+            placeholder="0.00"
+            onChange={(event) => update({ gastosGeneralesPercent: event.target.value })}
+          />
+        </label>
+        <label className="budget-setting-field">
+          <span>Utilidad %</span>
+          <input
+            className="cell-field"
+            type="text"
+            inputMode="decimal"
+            value={settings.utilidadPercent}
+            readOnly={!props.canEdit}
+            placeholder="0.00"
+            onChange={(event) => update({ utilidadPercent: event.target.value })}
+          />
+        </label>
+        <label className="budget-setting-field">
+          <span>IGV %</span>
+          <input
+            className="cell-field"
+            type="text"
+            inputMode="decimal"
+            value={settings.igvPercent}
+            readOnly={!props.canEdit}
+            placeholder="18.00"
+            onChange={(event) => update({ igvPercent: event.target.value })}
+          />
+        </label>
+        <label className="budget-setting-toggle">
+          <input
+            type="checkbox"
+            checked={settings.includeIgv}
+            disabled={!props.canEdit}
+            onChange={(event) => update({ includeIgv: event.target.checked })}
+          />
+          <span>Incluir IGV</span>
+        </label>
+      </div>
+    </section>
+  );
+}
+
+function BudgetSummaryMetric(props: { label: string; value: string; strong?: boolean }) {
+  return (
+    <span className={`budget-summary-metric${props.strong ? " is-strong" : ""}`}>
+      <span>{props.label}</span>
+      <strong>{props.value}</strong>
+    </span>
+  );
+}
+
+function MetradoDetailRow(props: {
+  canEdit: boolean;
+  code: string;
+  colSpan: number;
+  row: BudgetRow;
+  onAddItem: (rowId: string) => void;
+  onRemoveItem: (rowId: string, itemId: string) => void;
+  onUpdateItem: (rowId: string, itemId: string, fieldName: keyof MetradoItem, value: string) => void;
+}) {
+  const items = normalizeMetradoItems(props.row.metradoItems);
+  const title = props.row.descripcion.trim() || props.row.codificacion.trim() || `Partida ${props.code}`;
+  return (
+    <tr className="metrado-detail-row" onClick={(event) => event.stopPropagation()}>
+      <td colSpan={props.colSpan}>
+        <div className="metrado-panel">
+          <div className="metrado-panel-head">
+            <div className="metrado-panel-title">
+              <span className="apu-eyebrow">Hoja de metrado</span>
+              <strong>{props.code} | {title}</strong>
+            </div>
+            <span className="apu-total">
+              <span>Total metrado</span>
+              <strong>{formatAmount(getMetradoTotal(items))}</strong>
+            </span>
+          </div>
+          {props.canEdit && (
+            <div className="apu-actions">
+              <button type="button" className="apu-add-button" onClick={() => props.onAddItem(props.row.id)}>
+                + Linea de metrado
+              </button>
+            </div>
+          )}
+          <div className="apu-table-wrap">
+            <table className="metrado-table">
+              <thead>
+                <tr>
+                  <th>Descripcion</th>
+                  <th>Veces</th>
+                  <th>Largo</th>
+                  <th>Ancho</th>
+                  <th>Alto</th>
+                  <th>Parcial</th>
+                  <th>Accion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.length === 0 ? (
+                  <tr className="apu-empty-row">
+                    <td colSpan={7}>
+                      {props.canEdit ? "Agrega una linea para calcular el metrado tradicional." : "Sin hoja de metrado registrada."}
+                    </td>
+                  </tr>
+                ) : items.map((item) => (
+                  <tr key={item.id}>
+                    <td>
+                      <input
+                        className="cell-field apu-field apu-field--description"
+                        type="text"
+                        value={item.descripcion}
+                        readOnly={!props.canEdit}
+                        placeholder="Descripcion"
+                        onChange={(event) => props.onUpdateItem(props.row.id, item.id, "descripcion", event.target.value)}
+                      />
+                    </td>
+                    {(["veces", "largo", "ancho", "alto"] as Array<keyof MetradoItem>).map((fieldName) => (
+                      <td key={fieldName}>
+                        <input
+                          className="cell-field apu-field"
+                          type="text"
+                          inputMode="decimal"
+                          value={String(item[fieldName] || "")}
+                          readOnly={!props.canEdit}
+                          placeholder={fieldName === "veces" ? "1" : ""}
+                          onChange={(event) => props.onUpdateItem(props.row.id, item.id, fieldName, event.target.value)}
+                        />
+                      </td>
+                    ))}
+                    <td className="apu-partial-cell">{formatAmount(parseDecimal(item.parcial))}</td>
+                    <td>
+                      {props.canEdit ? (
+                        <button type="button" className="apu-remove-button" onClick={() => props.onRemoveItem(props.row.id, item.id)}>
+                          Eliminar
+                        </button>
+                      ) : (
+                        <span className="apu-readonly-mark">-</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function ApuDetailRow(props: {
+  canEdit: boolean;
+  code: string;
+  colSpan: number;
+  resourceCatalogItems: ResourceCatalogItem[];
+  row: BudgetRow;
+  rows: BudgetRow[];
+  unitCatalogItems: UnitCatalogItem[];
+  onAddItem: (rowId: string, category: ApuCategory) => void;
+  onRemoveItem: (rowId: string, itemId: string) => void;
+  onCreateUnit: () => string;
+  onFieldBlur: (rowId: string, fieldName: string) => void;
+  onFieldChange: (rowId: string, fieldName: string, value: string, auditNow?: boolean) => void;
+  onFieldFocus: (event: FocusEvent<HTMLInputElement | HTMLSelectElement>, rowId: string) => void;
+  onSelectResource: (rowId: string, itemId: string, resourceId: string) => void;
+  onUpdateItem: (rowId: string, itemId: string, fieldName: keyof ApuItem, value: string) => void;
+}) {
+  const items = normalizeApuItems(props.row.apuItems);
+  const catalogItems = normalizeResourceCatalogItems(props.resourceCatalogItems);
+  const unitOptions = getUnitCatalogCodes(props.unitCatalogItems);
+  const total = getApuTotal(items, props.row);
+  const subpartidaCodes = buildPartidaCodes(props.rows);
+  const subpartidaOptions = props.rows
+    .map((row, index) => ({ row, index, code: subpartidaCodes[index] || "" }))
+    .filter((entry) => entry.row.id !== props.row.id && !rowHasChildren(props.rows, entry.index));
+  const title = props.row.descripcion.trim() || props.row.codificacion.trim() || `Partida ${props.code}`;
+  return (
+    <tr className="apu-detail-row" onClick={(event) => event.stopPropagation()}>
+      <td colSpan={props.colSpan}>
+        <div className="apu-panel">
+          <div className="apu-panel-head">
+            <div className="apu-panel-title">
+              <span className="apu-eyebrow">Analisis de costo unitario</span>
+              <strong>{props.code} | {title}</strong>
+            </div>
+            <div className="apu-performance-fields" aria-label="Rendimientos APU">
+              <label className="apu-performance-field">
+                <span>Rendimiento MO</span>
+                <input
+                  className="cell-field apu-field apu-performance-input"
+                  name="rendimientoManoObra"
+                  type="text"
+                  inputMode="decimal"
+                  value={props.row.rendimientoManoObra}
+                  readOnly={!props.canEdit}
+                  placeholder="0.00"
+                  onFocus={(event) => props.onFieldFocus(event, props.row.id)}
+                  onChange={(event) => props.onFieldChange(props.row.id, "rendimientoManoObra", event.target.value)}
+                  onBlur={() => props.onFieldBlur(props.row.id, "rendimientoManoObra")}
+                />
+              </label>
+              <label className="apu-performance-field">
+                <span>Rendimiento EQ</span>
+                <input
+                  className="cell-field apu-field apu-performance-input"
+                  name="rendimientoEquipos"
+                  type="text"
+                  inputMode="decimal"
+                  value={props.row.rendimientoEquipos}
+                  readOnly={!props.canEdit}
+                  placeholder="0.00"
+                  onFocus={(event) => props.onFieldFocus(event, props.row.id)}
+                  onChange={(event) => props.onFieldChange(props.row.id, "rendimientoEquipos", event.target.value)}
+                  onBlur={() => props.onFieldBlur(props.row.id, "rendimientoEquipos")}
+                />
+              </label>
+            </div>
+            <span className="apu-total">
+              <span>Total APU</span>
+              <strong>{formatAmount(total)}</strong>
+            </span>
+          </div>
+
+          {props.canEdit && (
+            <div className="apu-actions" aria-label="Agregar insumos APU">
+              {APU_CATEGORY_OPTIONS.map((category) => (
+                <button
+                  key={category.key}
+                  type="button"
+                  className="apu-add-button"
+                  onClick={() => props.onAddItem(props.row.id, category.key)}
+                >
+                  + {category.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="apu-table-wrap">
+            <table className="apu-table">
+              <thead>
+                <tr>
+                  <th>Categoria</th>
+                  <th>Recurso / descripcion</th>
+                  <th>Cuadrilla</th>
+                  <th>Unidad</th>
+                  <th>Cantidad</th>
+                  <th>Precio unitario</th>
+                  <th>Parcial</th>
+                  <th>Accion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.length === 0 ? (
+                  <tr className="apu-empty-row">
+                    <td colSpan={8}>
+                      {props.canEdit
+                        ? "Agrega un insumo para que el APU calcule el costo unitario."
+                        : "Sin APU registrado para esta partida."}
+                    </td>
+                  </tr>
+                ) : APU_CATEGORY_OPTIONS.map((category) => {
+                  const categoryItems = items.filter((item) => item.category === category.key);
+                  if (categoryItems.length === 0) return null;
+                  return (
+                    <Fragment key={category.key}>
+                      <tr className="apu-category-row">
+                        <td colSpan={6}>{category.label}</td>
+                        <td>{formatAmount(getApuCategorySubtotal(items, category.key, props.row))}</td>
+                        <td></td>
+                      </tr>
+                      {categoryItems.map((item) => {
+                        const categoryResources = catalogItems.filter((resource) => resource.category === item.category);
+                        const listId = `apu-resource-list-${props.row.id}-${item.id}`;
+                        const linkedResource = item.resourceId
+                          ? catalogItems.find((resource) => resource.id === item.resourceId)
+                          : null;
+                        const renderedUnitOptions = item.unidad && !unitOptions.includes(item.unidad)
+                          ? [item.unidad, ...unitOptions]
+                          : unitOptions;
+                        const cantidadCalculada = isApuItemCantidadCalculated(item);
+                        const cantidadValue = formatApuItemCantidad(item, props.row);
+                        const cantidadTitle = cantidadCalculada
+                          ? "Cantidad calculada: Cuadrilla x 8 / Rendimiento"
+                          : "Cantidad manual";
+                        return (
+                          <tr key={item.id}>
+                            <td>
+                              <select
+                                className="cell-field cell-field--select apu-field"
+                                value={item.category}
+                                disabled={!props.canEdit}
+                                onChange={(event) => props.onUpdateItem(props.row.id, item.id, "category", event.target.value)}
+                              >
+                                {APU_CATEGORY_OPTIONS.map((option) => (
+                                  <option key={option.key} value={option.key}>{option.label}</option>
+                                ))}
+                              </select>
+                            </td>
+                            <td>
+                              <input
+                                className="cell-field apu-field apu-field--description"
+                                type="text"
+                                list={props.canEdit ? listId : undefined}
+                                value={item.descripcion}
+                                readOnly={!props.canEdit}
+                                placeholder="Recurso o insumo"
+                                title={linkedResource ? `Desde base: ${formatUnitCatalogLabel(linkedResource.unidad, props.unitCatalogItems)} | ${linkedResource.precioUnitario}` : "Recurso manual"}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  const selectedResource = categoryResources.find((resource) => (
+                                    resource.descripcion.trim().toLowerCase() === value.trim().toLowerCase()
+                                  ));
+                                  if (selectedResource) {
+                                    props.onSelectResource(props.row.id, item.id, selectedResource.id);
+                                    return;
+                                  }
+                                  props.onUpdateItem(props.row.id, item.id, "descripcion", value);
+                                }}
+                              />
+                              {props.canEdit && (
+                                <datalist id={listId}>
+                                  {categoryResources.map((resource) => (
+                                    <option
+                                      key={resource.id}
+                                      value={resource.descripcion}
+                                      label={`${formatUnitCatalogLabel(resource.unidad, props.unitCatalogItems) || "sin unidad"} | ${resource.precioUnitario || "0.00"}`}
+                                    />
+                                  ))}
+                                </datalist>
+                              )}
+                              <select
+                                className="cell-field cell-field--select apu-field apu-subpartida-select"
+                                value={item.subpartidaId || ""}
+                                disabled={!props.canEdit}
+                                title="Subpartida"
+                                onChange={(event) => props.onUpdateItem(props.row.id, item.id, "subpartidaId", event.target.value)}
+                              >
+                                <option value="">Sin subpartida</option>
+                                {subpartidaOptions.map((entry) => (
+                                  <option key={entry.row.id} value={entry.row.id}>
+                                    {`${entry.code} | ${entry.row.descripcion || entry.row.codificacion || "Subpartida"}`}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td>
+                              <input
+                                className="cell-field apu-field apu-field--crew"
+                                type="text"
+                                inputMode="decimal"
+                                value={item.cuadrilla}
+                                readOnly={!props.canEdit}
+                                placeholder="0.00"
+                                onChange={(event) => props.onUpdateItem(props.row.id, item.id, "cuadrilla", event.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <select
+                                className="cell-field cell-field--select apu-field"
+                                value={item.unidad}
+                                disabled={!props.canEdit}
+                                onChange={(event) => {
+                                  if (event.target.value === NEW_UNIT_SELECT_VALUE) {
+                                    const newUnitCode = props.onCreateUnit();
+                                    if (newUnitCode) props.onUpdateItem(props.row.id, item.id, "unidad", newUnitCode);
+                                    return;
+                                  }
+                                  props.onUpdateItem(props.row.id, item.id, "unidad", event.target.value);
+                                }}
+                              >
+                                <option value="">Selecciona</option>
+                                {renderedUnitOptions.map((option) => (
+                                  <option key={option} value={option}>{formatUnitCatalogLabel(option, props.unitCatalogItems)}</option>
+                                ))}
+                                {props.canEdit && <option value={NEW_UNIT_SELECT_VALUE}>+ Nueva unidad de medida</option>}
+                              </select>
+                            </td>
+                            <td>
+                              <input
+                                className={`cell-field apu-field${cantidadCalculada ? " apu-field--calculated" : ""}`}
+                                type="text"
+                                inputMode="decimal"
+                                value={cantidadValue}
+                                readOnly={!props.canEdit || cantidadCalculada}
+                                aria-readonly={!props.canEdit || cantidadCalculada}
+                                placeholder="0.00"
+                                title={cantidadTitle}
+                                onChange={(event) => {
+                                  if (!cantidadCalculada) props.onUpdateItem(props.row.id, item.id, "cantidad", event.target.value);
+                                }}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                className={`cell-field apu-field${item.subpartidaId ? " apu-field--calculated" : ""}`}
+                                type="text"
+                                inputMode="decimal"
+                                value={item.precioUnitario}
+                                readOnly={!props.canEdit || Boolean(item.subpartidaId)}
+                                placeholder="0.00"
+                                title={item.subpartidaId ? "Precio desde subpartida" : "Precio unitario"}
+                                onChange={(event) => {
+                                  if (!item.subpartidaId) props.onUpdateItem(props.row.id, item.id, "precioUnitario", event.target.value);
+                                }}
+                              />
+                            </td>
+                            <td className="apu-partial-cell">{formatAmount(getApuItemPartial(item, props.row))}</td>
+                            <td>
+                              {props.canEdit ? (
+                                <button
+                                  type="button"
+                                  className="apu-remove-button"
+                                  onClick={() => props.onRemoveItem(props.row.id, item.id)}
+                                >
+                                  Eliminar
+                                </button>
+                              ) : (
+                                <span className="apu-readonly-mark">-</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function ResourceCatalogPanel(props: {
+  canEdit: boolean;
+  filterQuery: string;
+  items: ResourceCatalogItem[];
+  polynomialGroups: PolynomialGroup[];
+  unitCatalogItems: UnitCatalogItem[];
+  onAddItem: (category: ApuCategory) => void;
+  onCreateUnit: () => string;
+  onRemoveItem: (resourceId: string) => void;
+  onUpdateItem: (resourceId: string, fieldName: keyof ResourceCatalogItem, value: string) => void;
+}) {
+  const normalizedItems = normalizeResourceCatalogItems(props.items);
+  const filteredItems = filterResourceCatalogItems(normalizedItems, props.filterQuery, props.unitCatalogItems);
+  const polynomialGroups = normalizePolynomialGroups(props.polynomialGroups);
+  const unitOptions = getUnitCatalogCodes(props.unitCatalogItems);
+  return (
+    <div className="resources-panel">
+      <div className="resources-summary">
+        {APU_CATEGORY_OPTIONS.map((category) => (
+          <span key={category.key} className="resources-summary-pill">
+            <span>{category.label}</span>
+            <strong>{normalizedItems.filter((item) => item.category === category.key).length}</strong>
+          </span>
+        ))}
+      </div>
+
+      <div className="resources-sections">
+        {APU_CATEGORY_OPTIONS.map((category) => {
+          const categoryItems = filteredItems.filter((item) => item.category === category.key);
+          return (
+            <section key={category.key} className="resources-section">
+              <div className="resources-section-head">
+                <div>
+                  <strong>{category.label}</strong>
+                  <span>{categoryItems.length} recursos visibles</span>
+                </div>
+                {props.canEdit && (
+                  <button
+                    type="button"
+                    className="apu-add-button"
+                    onClick={() => props.onAddItem(category.key)}
+                  >
+                    + Agregar
+                  </button>
+                )}
+              </div>
+
+              <div className="resources-table-wrap">
+                <table className="resources-table">
+                  <thead>
+                    <tr>
+                      <th>Categoria</th>
+                      <th>Recurso / Descripcion</th>
+                      <th>Unidad</th>
+                      <th>Precio unitario</th>
+                      <th>Grupo polinomico</th>
+                      <th>Accion</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {categoryItems.length === 0 ? (
+                      <tr className="resources-empty-row">
+                        <td colSpan={6}>
+                          {props.filterQuery
+                            ? "Sin recursos para esta busqueda."
+                            : "Agrega recursos para usarlos desde el APU."}
+                        </td>
+                      </tr>
+                    ) : categoryItems.map((item) => {
+                      const renderedUnitOptions = item.unidad && !unitOptions.includes(item.unidad)
+                        ? [item.unidad, ...unitOptions]
+                        : unitOptions;
+                      return (
+                        <tr key={item.id}>
+                          <td>
+                            <select
+                              className="cell-field cell-field--select resource-field"
+                              value={item.category}
+                              disabled={!props.canEdit}
+                              onChange={(event) => props.onUpdateItem(item.id, "category", event.target.value)}
+                            >
+                              {APU_CATEGORY_OPTIONS.map((option) => (
+                                <option key={option.key} value={option.key}>{option.label}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td>
+                            <input
+                              className="cell-field resource-field resource-field--description"
+                              type="text"
+                              value={item.descripcion}
+                              readOnly={!props.canEdit}
+                              placeholder="Nombre del recurso"
+                              onChange={(event) => props.onUpdateItem(item.id, "descripcion", event.target.value)}
+                            />
+                          </td>
+                          <td>
+                            <select
+                              className="cell-field cell-field--select resource-field"
+                              value={item.unidad}
+                              disabled={!props.canEdit}
+                              onChange={(event) => {
+                                if (event.target.value === NEW_UNIT_SELECT_VALUE) {
+                                  const newUnitCode = props.onCreateUnit();
+                                  if (newUnitCode) props.onUpdateItem(item.id, "unidad", newUnitCode);
+                                  return;
+                                }
+                                props.onUpdateItem(item.id, "unidad", event.target.value);
+                              }}
+                            >
+                              <option value="">Selecciona</option>
+                              {renderedUnitOptions.map((option) => (
+                                <option key={option} value={option}>{formatUnitCatalogLabel(option, props.unitCatalogItems)}</option>
+                              ))}
+                              {props.canEdit && <option value={NEW_UNIT_SELECT_VALUE}>+ Nueva unidad de medida</option>}
+                            </select>
+                          </td>
+                          <td>
+                            <input
+                              className="cell-field resource-field"
+                              type="text"
+                              inputMode="decimal"
+                              value={item.precioUnitario}
+                              readOnly={!props.canEdit}
+                              placeholder="0.00"
+                              onChange={(event) => props.onUpdateItem(item.id, "precioUnitario", event.target.value)}
+                            />
+                          </td>
+                          <td>
+                            <select
+                              className="cell-field cell-field--select resource-field"
+                              value={item.polynomialGroupId}
+                              disabled={!props.canEdit}
+                              onChange={(event) => props.onUpdateItem(item.id, "polynomialGroupId", event.target.value)}
+                            >
+                              <option value="">Sin grupo</option>
+                              {polynomialGroups.map((group) => (
+                                <option key={group.id} value={group.id}>
+                                  {`${group.codigo || group.descripcion || "Grupo"}${group.indice ? ` | ${group.indice}` : ""}`}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td>
+                            {props.canEdit ? (
+                              <button
+                                type="button"
+                                className="apu-remove-button"
+                                onClick={() => props.onRemoveItem(item.id)}
+                              >
+                                Eliminar
+                              </button>
+                            ) : (
+                              <span className="apu-readonly-mark">-</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PolynomialPanel(props: {
+  canEdit: boolean;
+  currentProject: BudgetProject;
+  onAddGroup: () => void;
+  onRemoveGroup: (groupId: string) => void;
+  onUpdateGroup: (groupId: string, fieldName: keyof PolynomialGroup, value: string) => void;
+}) {
+  const groups = normalizePolynomialGroups(props.currentProject.polynomialGroups);
+  const breakdown = buildPolynomialBreakdown(
+    props.currentProject.rows,
+    groups,
+    props.currentProject.resourceCatalogItems
+  );
+  const costoDirecto = getGrandTotalForRows(props.currentProject.rows);
+  return (
+    <div className="polynomial-panel">
+      <div className="polynomial-head">
+        <div className="budget-summary-grid">
+          <BudgetSummaryMetric label="Costo directo" value={formatAmount(costoDirecto)} />
+          <BudgetSummaryMetric label="Grupos" value={String(groups.length)} />
+          <BudgetSummaryMetric label="Incidencia asignada" value={`${formatAmount(breakdown.reduce((sum, item) => sum + item.incidenciaPercent, 0))}%`} strong />
+        </div>
+        {props.canEdit && (
+          <button type="button" className="apu-add-button" onClick={props.onAddGroup}>
+            + Grupo polinomico
+          </button>
+        )}
+      </div>
+      <div className="polynomial-grid">
+        <section className="polynomial-section">
+          <div className="resources-section-head">
+            <div>
+              <strong>Grupos e indices</strong>
+              <span>{groups.length} grupos configurados</span>
+            </div>
+          </div>
+          <div className="resources-table-wrap">
+            <table className="resources-table">
+              <thead>
+                <tr>
+                  <th>Codigo</th>
+                  <th>Descripcion</th>
+                  <th>Indice</th>
+                  <th>Categoria</th>
+                  <th>Accion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groups.length === 0 ? (
+                  <tr className="resources-empty-row">
+                    <td colSpan={5}>Crea grupos para asignarlos desde Base de Recursos.</td>
+                  </tr>
+                ) : groups.map((group) => (
+                  <tr key={group.id}>
+                    <td>
+                      <input
+                        className="cell-field resource-field"
+                        type="text"
+                        value={group.codigo}
+                        readOnly={!props.canEdit}
+                        placeholder="J"
+                        onChange={(event) => props.onUpdateGroup(group.id, "codigo", event.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="cell-field resource-field resource-field--description"
+                        type="text"
+                        value={group.descripcion}
+                        readOnly={!props.canEdit}
+                        placeholder="Cemento Portland"
+                        onChange={(event) => props.onUpdateGroup(group.id, "descripcion", event.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="cell-field resource-field"
+                        type="text"
+                        value={group.indice}
+                        readOnly={!props.canEdit}
+                        placeholder="Indice INEI"
+                        onChange={(event) => props.onUpdateGroup(group.id, "indice", event.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <select
+                        className="cell-field cell-field--select resource-field"
+                        value={group.categoria}
+                        disabled={!props.canEdit}
+                        onChange={(event) => props.onUpdateGroup(group.id, "categoria", event.target.value)}
+                      >
+                        {APU_CATEGORY_OPTIONS.map((option) => (
+                          <option key={option.key} value={option.key}>{option.label}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      {props.canEdit ? (
+                        <button type="button" className="apu-remove-button" onClick={() => props.onRemoveGroup(group.id)}>
+                          Eliminar
+                        </button>
+                      ) : (
+                        <span className="apu-readonly-mark">-</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section className="polynomial-section">
+          <div className="resources-section-head">
+            <div>
+              <strong>Incidencias</strong>
+              <span>Calculadas desde APUs y metrados</span>
+            </div>
+          </div>
+          <div className="resources-table-wrap">
+            <table className="resources-table">
+              <thead>
+                <tr>
+                  <th>Codigo</th>
+                  <th>Grupo</th>
+                  <th>Indice</th>
+                  <th>Costo</th>
+                  <th>Incidencia</th>
+                </tr>
+              </thead>
+              <tbody>
+                {breakdown.length === 0 ? (
+                  <tr className="resources-empty-row">
+                    <td colSpan={5}>Aun no hay recursos APU con costo para consolidar.</td>
+                  </tr>
+                ) : breakdown.map((item) => (
+                  <tr key={item.groupId}>
+                    <td>{item.codigo}</td>
+                    <td>{item.descripcion}</td>
+                    <td>{item.indice}</td>
+                    <td className="apu-partial-cell">{formatAmount(item.costo)}</td>
+                    <td className="apu-partial-cell">{formatAmount(item.incidenciaPercent)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
   );
 }
 
@@ -1423,6 +2981,14 @@ function ExportPanel(props: {
 
   return (
     <div id="export-panel" className="export-panel">
+      {props.exportMode === "presupuesto" && (
+        <BudgetSummaryPanel
+          canEdit={false}
+          settings={props.currentProject.budgetSettings}
+          totals={getBudgetTotals(rows, props.currentProject.budgetSettings)}
+          onChange={() => undefined}
+        />
+      )}
       <div className="export-grid">
         {rootEntries.map(({ row, index, code }) => {
           const branchSize = getBranchEndLocal(rows, index) - index + 1;
@@ -1441,7 +3007,9 @@ function ExportPanel(props: {
                   return;
                 }
                 const fileName = sanitizeFilename(`${props.currentProject.name} - ${title}`) || modeConfig.fileFallbackName;
-                const workbook = buildXlsxWorkbook(title, exportRows, modeConfig.columns);
+                const workbook = props.exportMode === "presupuesto"
+                  ? buildS10BudgetWorkbook(props.currentProject, title, rows, index, props.codes)
+                  : buildXlsxWorkbook(title, exportRows, modeConfig.columns);
                 downloadBlobFile(`${fileName}.xlsx`, workbook);
               }}
             >
@@ -1456,10 +3024,78 @@ function ExportPanel(props: {
   );
 }
 
+function buildS10BudgetWorkbook(project: BudgetProject, title: string, rows: BudgetRow[], rootIndex: number, codes: string[]) {
+  const branchEnd = getBranchEndLocal(rows, rootIndex);
+  const scopedRows = cloneRows(rows.slice(rootIndex, branchEnd + 1));
+  const scopedCodes = codes.slice(rootIndex, branchEnd + 1);
+  const scopedProject = {
+    ...project,
+    rows: scopedRows
+  };
+  const polynomialRows = buildPolynomialBreakdown(
+    scopedRows,
+    project.polynomialGroups,
+    project.resourceCatalogItems
+  ).map((item) => ({
+    codigo: item.codigo,
+    descripcion: item.descripcion,
+    indice: item.indice,
+    costo: item.costo,
+    incidenciaPercent: item.incidenciaPercent
+  }));
+  return buildXlsxWorkbookFromSheets([
+    {
+      name: "Presupuesto",
+      title,
+      rows: buildExportRowsForMode(rows, rootIndex, codes, "presupuesto"),
+      columns: EXPORT_MODE_CONFIGS.presupuesto.columns
+    },
+    {
+      name: "APU",
+      title: `${title} - APU`,
+      rows: buildApuReportRows(scopedRows, scopedCodes),
+      columns: APU_REPORT_COLUMNS
+    },
+    {
+      name: "Recursos",
+      title: `${title} - Recursos`,
+      rows: buildResourceReportRows(scopedProject),
+      columns: RESOURCE_REPORT_COLUMNS
+    },
+    {
+      name: "Metrados",
+      title: `${title} - Metrados`,
+      rows: buildMetradoReportRows(scopedRows, scopedCodes),
+      columns: METRADO_REPORT_COLUMNS
+    },
+    {
+      name: "Pie",
+      title: `${title} - Pie`,
+      rows: buildBudgetSummaryReportRows(scopedRows, project.budgetSettings),
+      columns: BUDGET_SUMMARY_REPORT_COLUMNS
+    },
+    {
+      name: "Formula",
+      title: `${title} - Formula Polinomica`,
+      rows: polynomialRows,
+      columns: POLYNOMIAL_REPORT_COLUMNS
+    }
+  ]);
+}
+
 function BimControlPanel(props: {
   currentProject: BudgetProject;
   rows: BudgetRow[];
   codes: string[];
+  jobsState: BimJobsPanelState;
+  readinessState: BimReadinessPanelState;
+  canCreateJob: boolean;
+  onCancelJob: (jobId: string) => void;
+  onCreateJob: () => void;
+  onApplyJob: (jobId: string) => void;
+  onRefreshJobs: () => void;
+  onRefreshReadiness: () => void;
+  onRetryJob: (jobId: string) => void;
   onOpenRvtExport: () => void;
   onSelectRow: (rowId: string) => void;
 }) {
@@ -1483,6 +3119,44 @@ function BimControlPanel(props: {
             <button type="button" className="toolbar-button" onClick={props.onOpenRvtExport}>Exportaciones RVT</button>
           </div>
           <LatestRevitExport latestExport={report.latestRevitExport} />
+        </section>
+        <section className="bim-section">
+          <div className="bim-section-head">
+            <div>
+              <strong>Preparacion BIM</strong>
+              <span>Estado del backend, puente Revit y credenciales locales sin exponer secretos.</span>
+            </div>
+            <button type="button" className="toolbar-button" onClick={props.onRefreshReadiness}>Verificar</button>
+          </div>
+          <BimReadinessPanel state={props.readinessState} />
+        </section>
+        <section className="bim-section">
+          <div className="bim-section-head">
+            <div>
+              <strong>Jobs BIM Revit</strong>
+              <span>La web crea trabajos asincronos y Revit reporta progreso sin bloquear la pantalla.</span>
+            </div>
+            <div className="bim-job-actions">
+              <button
+                type="button"
+                className="toolbar-button toolbar-button--primary"
+                disabled={!props.canCreateJob || props.jobsState.creating}
+                onClick={props.onCreateJob}
+              >
+                Revit activo
+              </button>
+              <button type="button" className="toolbar-button" onClick={props.onRefreshJobs}>Actualizar</button>
+            </div>
+          </div>
+          <BimJobQueueSummaryStrip summary={props.jobsState.summary} />
+          <BimJobsList
+            jobs={props.jobsState.jobs}
+            loading={props.jobsState.loading}
+            error={props.jobsState.error}
+            onApplyJob={props.onApplyJob}
+            onCancelJob={props.onCancelJob}
+            onRetryJob={props.onRetryJob}
+          />
         </section>
         <section className="bim-section">
           <div className="bim-section-head">
@@ -1534,6 +3208,224 @@ function BimControlPanel(props: {
           </section>
         </div>
       </div>
+    </div>
+  );
+}
+
+function BimReadinessPanel(props: { state: BimReadinessPanelState }) {
+  if (props.state.error) {
+    return (
+      <div className="bim-job-empty">
+        <strong>No se pudo verificar BIM</strong>
+        <span>{props.state.error}</span>
+      </div>
+    );
+  }
+  if (props.state.loading && !props.state.report) {
+    return (
+      <div className="bim-job-empty">
+        <strong>Verificando BIM</strong>
+        <span>Consultando readiness del backend.</span>
+      </div>
+    );
+  }
+  if (!props.state.report) {
+    return (
+      <div className="bim-job-empty">
+        <strong>Readiness sin consultar</strong>
+        <span>Usa Verificar para revisar la preparacion BIM.</span>
+      </div>
+    );
+  }
+
+  const report = props.state.report;
+  const tone = getActiveRevitReadinessTone(report);
+  const visibleChecks = selectActiveRevitReadinessVisibleChecks(report);
+
+  return (
+    <div className={`bim-readiness-card bim-readiness-card--${tone}`}>
+      <div className="bim-readiness-head">
+        <div>
+          <strong>{getActiveRevitReadinessLabel(report)}</strong>
+          <span>{`Backend BIM | ${report.storage.label || report.storage.kind || "storage sin declarar"}`}</span>
+        </div>
+        <span className={`bim-readiness-badge bim-readiness-badge--${tone}`}>
+          {formatBimReadinessTone(tone)}
+        </span>
+      </div>
+      <div className="bim-readiness-check-grid">
+        {visibleChecks.map((check) => (
+          <span key={check.id} className={`bim-readiness-check bim-readiness-check--${check.status}`}>
+            <small>{check.label}</small>
+            <strong>{formatBimReadinessTone(check.status)}</strong>
+          </span>
+        ))}
+      </div>
+      <div className="bim-readiness-foot">
+        <span>{`Pendientes: ${getActiveRevitReadinessMissingSummary(report)}`}</span>
+        {props.state.loading && <span>Actualizando...</span>}
+      </div>
+    </div>
+  );
+}
+
+function BimJobQueueSummaryStrip(props: { summary: BimJobQueueSummary }) {
+  const summary = props.summary;
+  const bridgeWait = getBimJobBridgeWaitDiagnostic(summary);
+  const bridgePresence = summary.bridgePresence;
+  const bridgeDiagnosticIssue = formatBimBridgeDiagnosticIssue(bridgePresence.latestDiagnostic);
+  return (
+    <div className="bim-job-summary-stack">
+      <div className="bim-job-summary-grid" aria-label="Resumen operativo de jobs BIM">
+        <span className={`bim-job-summary-pill${summary.queued > 0 ? " is-warn" : ""}`}>
+          <small>En cola</small>
+          <strong>{summary.queued}</strong>
+        </span>
+        <span className={`bim-job-summary-pill${summary.active > 0 ? " is-active" : ""}`}>
+          <small>Activos</small>
+          <strong>{summary.active}</strong>
+        </span>
+        <span className={`bim-job-summary-pill${summary.failed > 0 ? " is-warn" : ""}`}>
+          <small>Fallidos</small>
+          <strong>{summary.failed}</strong>
+        </span>
+        <span className={`bim-job-summary-pill${bridgePresence.online ? " is-active" : summary.activeRevitQueued > 0 ? " is-warn" : ""}`}>
+          <small>Bridge</small>
+          <strong>{bridgePresence.online ? "Abierto" : "Sin senal"}</strong>
+        </span>
+        <span className={`bim-job-summary-pill${summary.activeRevitQueued > 0 ? " is-warn" : ""}`}>
+          <small>Revit cola</small>
+          <strong>{summary.activeRevitQueued}</strong>
+        </span>
+        <span className="bim-job-summary-pill">
+          <small>Revit proc.</small>
+          <strong>{summary.activeRevitProcessing}</strong>
+        </span>
+        <span className="bim-job-summary-pill">
+          <small>Espera Revit</small>
+          <strong>{formatBimJobAge(summary.oldestActiveRevitQueuedAgeSeconds)}</strong>
+        </span>
+      </div>
+      {bridgeWait.tone !== "ok" && (
+        <div className={`bim-job-bridge-wait bim-job-bridge-wait--${bridgeWait.tone}`}>
+          <strong>{bridgeWait.label}</strong>
+          <span>
+            {`${bridgeWait.waitingJobCount} job${bridgeWait.waitingJobCount === 1 ? "" : "s"} active-revit en cola hace ${formatBimJobAge(bridgeWait.oldestWaitSeconds)}.`}
+          </span>
+          {bridgeWait.action && <em>{bridgeWait.action}</em>}
+        </div>
+      )}
+      {bridgeDiagnosticIssue && (
+        <div className="bim-job-bridge-wait bim-job-bridge-wait--warning">
+          <strong>Bridge abierto no listo</strong>
+          <em>{bridgeDiagnosticIssue}</em>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BimJobsList(props: {
+  jobs: BimJobRecord[];
+  loading: boolean;
+  error: string;
+  onApplyJob: (jobId: string) => void;
+  onCancelJob: (jobId: string) => void;
+  onRetryJob: (jobId: string) => void;
+}) {
+  if (props.error) {
+    return (
+      <div className="bim-job-empty">
+        <strong>No se pudieron cargar jobs BIM</strong>
+        <span>{props.error}</span>
+      </div>
+    );
+  }
+  if (props.loading && props.jobs.length === 0) {
+    return (
+      <div className="bim-job-empty">
+        <strong>Cargando jobs BIM</strong>
+        <span>Consultando la cola asincrona.</span>
+      </div>
+    );
+  }
+  if (props.jobs.length === 0) {
+    return (
+      <div className="bim-job-empty">
+        <strong>Sin jobs BIM</strong>
+        <span>Crea un job para que Revit activo lo procese cuando el modelo este abierto.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bim-job-list">
+      {props.jobs.map((job) => {
+        const artifacts = getBimJobArtifacts(job);
+        const timingText = formatBimJobTiming(job);
+        const fluencyMetrics = getBimJobFluencyMetrics(job);
+
+        return (
+          <article key={job.id} className={`bim-job-card bim-job-card--${job.status}`}>
+            <div className="bim-job-card-head">
+              <div>
+                <strong>{job.commandType}</strong>
+                <span>{`${getBimJobTargetModeLabel(job.targetMode)} - ${getBimJobStatusLabel(job.status)} - ${formatDateTime(job.updatedAt)}`}</span>
+              </div>
+              <div className="bim-job-card-actions">
+                {!isBimJobFinished(job.status) && (
+                  <button type="button" className="toolbar-button" onClick={() => props.onCancelJob(job.id)}>Cancelar</button>
+                )}
+                {canCreateBimApplyJob(job) && !hasBimApplyJobForPreview(props.jobs, job.id) && (
+                  <button type="button" className="toolbar-button toolbar-button--primary" onClick={() => props.onApplyJob(job.id)}>Aplicar en Revit</button>
+                )}
+                {canRetryBimJob(job) && (
+                  <button type="button" className="toolbar-button" onClick={() => props.onRetryJob(job.id)}>Reintentar</button>
+                )}
+              </div>
+            </div>
+            <div className="bim-job-progress" aria-label={`Progreso ${Math.round(job.percent)}%`}>
+              <span style={{ width: `${Math.max(0, Math.min(100, job.percent))}%` }} />
+            </div>
+            <div className="bim-job-meta">
+              <span>{job.stage}</span>
+              <span className="bim-job-timing">{timingText}</span>
+              <strong>{`${Math.round(job.percent)}%`}</strong>
+            </div>
+            {fluencyMetrics && (
+              <div className={`bim-job-fluency bim-job-fluency--${fluencyMetrics.status}`} aria-label="Metrica de fluidez BIM">
+                <span>{formatBimJobFluencyMetrics(fluencyMetrics)}</span>
+              </div>
+            )}
+            {artifacts.length > 0 && (
+              <div className="bim-job-artifacts">
+                <span>{`${artifacts.length} artefacto${artifacts.length === 1 ? "" : "s"} BIM guardado${artifacts.length === 1 ? "" : "s"}`}</span>
+                <div className="bim-job-artifact-links">
+                  {artifacts.slice(0, 3).map((artifact) => (
+                    <a
+                      key={artifact.id}
+                      className="bim-job-artifact-link"
+                      href={getBimArtifactDownloadUrl(job.id, artifact.id)}
+                      title={artifact.kind}
+                    >
+                      {artifact.name}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+            {job.logs.length > 0 && (
+              <div className="bim-job-log">
+                {job.logs.slice(-3).map((log) => (
+                  <span key={log.id} className={`bim-job-log__line bim-job-log__line--${log.level}`}>
+                    {`${formatDateTime(log.createdAt)} - ${log.message}`}
+                  </span>
+                ))}
+              </div>
+            )}
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -1701,7 +3593,7 @@ function SnapshotPanel(props: {
                 <div className="snapshot-card-head">
                   <div className="snapshot-card-title">
                     <strong>{snapshot.name}</strong>
-                    <span>{`V${snapshot.versionNumber} - ${snapshot.userName}`}</span>
+                    <span>{`V${snapshot.versionNumber} - ${getSnapshotTypeLabel(snapshot.snapshotType)} - ${snapshot.userName}`}</span>
                   </div>
                   <span className="snapshot-card-date">{formatDateTime(snapshot.createdAt)}</span>
                 </div>
@@ -2462,6 +4354,8 @@ function NavIcon(props: { view: ViewKey }) {
   switch (props.view) {
     case "presupuesto":
       return <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><rect x="4" y="2" width="16" height="20" rx="2"></rect><path d="M8 6h8"></path><path d="M8 10h.01"></path><path d="M12 10h.01"></path><path d="M16 10h.01"></path><path d="M8 14h.01"></path><path d="M12 14h.01"></path><path d="M16 14h.01"></path></svg>;
+    case "base-recursos":
+      return <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M4 4h16v5H4z"></path><path d="M4 15h16v5H4z"></path><path d="M8 9v6"></path><path d="M16 9v6"></path></svg>;
     case "control-bim":
       return <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M12 2l8 4v12l-8 4-8-4V6z"></path><path d="M12 22V12"></path><path d="M20 6l-8 6-8-6"></path></svg>;
     case "auditoria":
@@ -2496,7 +4390,7 @@ function buildMetrics(
   const grandTotal = formatAmount(getGrandTotalForRows(rows));
   const visibleRows = visibleEntries.length;
   let selectedLabel = "Ninguna";
-  if (contentType === "export" || contentType === "users" || contentType === "bim-control") {
+  if (contentType === "export" || contentType === "users" || contentType === "bim-control" || contentType === "resources" || contentType === "polynomial") {
     selectedLabel = "No aplica";
   } else if (selectedRow && selectedIndex >= 0) {
     const code = codes[selectedIndex];
@@ -2519,14 +4413,19 @@ function buildMetrics(
     visibleRows,
     selectedLabel,
     filterStatus,
-    selectionVisible: !(contentType === "export" || contentType === "users" || contentType === "bim-control")
+    selectionVisible: !(contentType === "export" || contentType === "users" || contentType === "bim-control" || contentType === "resources" || contentType === "polynomial")
   };
 }
 
 function isFieldEditable(columns: ViewColumn[], rows: BudgetRow[], rowIndex: number, fieldName: string) {
+  if (fieldName === "rendimientoManoObra" || fieldName === "rendimientoEquipos") {
+    return rowIndex >= 0 && rowIndex < rows.length && !rowHasChildren(rows, rowIndex);
+  }
   const column = columns.find((entry) => entry.field === fieldName);
   if (!column || !["input", "select"].includes(column.type) || column.editable === false) return false;
   if (column.field === "reglaMetrado" && !isRevitMetradoType(rows[rowIndex]?.tipoMetrado)) return false;
+  if (column.field === "costo" && hasApuItems(rows[rowIndex])) return false;
+  if (column.field === "metradoTradicional" && normalizeMetradoItems(rows[rowIndex]?.metradoItems).length > 0) return false;
   if (!isLeafOnlyField(column.field)) return true;
   return !rowHasChildren(rows, rowIndex);
 }
@@ -2547,7 +4446,17 @@ function doesAuditEntryMatchFilter(entry: AuditEntry, filter: AuditFilterKey) {
       && entryDate.getDate() === now.getDate();
   }
   if (filter === "structure") return entry.type === "structure";
-  if (filter === "cost") return ["costo", "metradoTradicional", "metradoBim", "tipoMetrado", "reglaMetrado"].includes(entry.field);
+  if (filter === "cost") {
+    return [
+      "costo",
+      "metradoTradicional",
+      "metradoBim",
+      "tipoMetrado",
+      "reglaMetrado",
+      "rendimientoManoObra",
+      "rendimientoEquipos"
+    ].includes(entry.field);
+  }
   return true;
 }
 
@@ -2561,7 +4470,9 @@ function getAuditEntryTitle(entry: AuditEntry) {
     metradoTradicional: "Metrado tradicional",
     metradoBim: "Metrado BIM",
     tipoMetrado: "Tipo de metrado",
-    reglaMetrado: "Regla de metrado"
+    reglaMetrado: "Regla de metrado",
+    rendimientoManoObra: "Rendimiento MO",
+    rendimientoEquipos: "Rendimiento EQ"
   };
   return labels[entry.field] || entry.field;
 }
@@ -2573,14 +4484,167 @@ function getAuditEntryDetail(entry: AuditEntry) {
   return `${entry.beforeValue || "Vacio"} -> ${entry.afterValue || "Vacio"}`;
 }
 
+function getSnapshotTypeLabel(snapshotType: BudgetSnapshot["snapshotType"]) {
+  if (snapshotType === "venta") return "Venta";
+  if (snapshotType === "meta") return "Meta";
+  if (snapshotType === "linea-base") return "Linea base";
+  return "Manual";
+}
+
 function formatRevitExportMeta(record: NonNullable<BudgetProject["latestRevitExport"]>) {
   const version = record.revitVersion ? ` - ${record.revitVersion}` : "";
   return `${formatDateTime(record.exportedAt || record.createdAt)} - ${record.userName || "Revit Addin"}${version}`;
 }
 
+function createEmptyBimJobQueueSummary(): BimJobQueueSummary {
+  return {
+    total: 0,
+    queued: 0,
+    active: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    activeRevit: 0,
+    activeRevitQueued: 0,
+    activeRevitProcessing: 0,
+    cloudModel: 0,
+    cloudModelQueued: 0,
+    cloudModelProcessing: 0,
+    oldestQueuedAt: "",
+    oldestQueuedAgeSeconds: 0,
+    oldestActiveRevitQueuedAt: "",
+    oldestActiveRevitQueuedAgeSeconds: 0,
+    oldestActiveAt: "",
+    latestCompletedAt: "",
+    oldestActiveAgeSeconds: 0,
+    generatedAt: new Date().toISOString(),
+    bridgePresence: {
+      online: false,
+      onlineCount: 0,
+      knownCount: 0,
+      ttlSeconds: 180,
+      latestSeenAt: "",
+      latestSeenAgeSeconds: 0,
+      latestBridgeId: "",
+      latestRequestedBy: "",
+      latestModelIdentity: {},
+      latestDiagnostic: null,
+    },
+  };
+}
+
+function formatBimBridgeDiagnosticIssue(diagnostic: BimJobQueueSummary["bridgePresence"]["latestDiagnostic"]) {
+  if (!diagnostic || diagnostic.canClaim) {
+    return "";
+  }
+  if (diagnostic.issues.length > 0) {
+    return diagnostic.issues.slice(0, 2).join(" ");
+  }
+  if (!diagnostic.signedIn) {
+    return "Inicia sesion con Google en el add-in de Revit.";
+  }
+  if (!diagnostic.hasIngestApiKey) {
+    return "Configura web.ingestApiKey con la llave REVIT_INGEST_API_KEY.";
+  }
+  if (diagnostic.runnerBusy) {
+    return "Revit esta procesando otro job BIM.";
+  }
+  if (!diagnostic.autoClaimEnabled) {
+    return "Activa web.autoClaimBimJobs o usa el boton Jobs BIM en Revit.";
+  }
+  return diagnostic.status ? `Estado bridge: ${diagnostic.status}.` : "";
+}
+
+function formatBimJobAge(seconds: number) {
+  if (seconds <= 0) return "0s";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return `${hours}h ${remainderMinutes}m`;
+}
+
+function formatBimJobTiming(job: BimJobRecord) {
+  const queue = formatBimJobAge(job.queueWaitSeconds);
+  const total = formatBimJobAge(job.totalSeconds);
+  if (job.status === "queued") {
+    return `Cola ${queue} · total ${total}`;
+  }
+  return `Cola ${queue} · ejec. ${formatBimJobAge(job.runSeconds)} · total ${total}`;
+}
+
+function formatBimJobFluencyMetrics(metrics: NonNullable<ReturnType<typeof getBimJobFluencyMetrics>>) {
+  const planned = metrics.plannedBatches > 0 ? metrics.plannedBatches : "?";
+  const size = metrics.batchSize > 0 ? ` - lote ${metrics.batchSize}` : "";
+  const yieldText = metrics.yieldDelayMs > 0 ? ` - pausa ${metrics.yieldDelayMs}ms` : "";
+  const average = formatBimJobDurationMs(metrics.averageBatchDurationMs);
+  const max = formatBimJobDurationMs(metrics.maxBatchDurationMs);
+  return `Fluidez ${getBimJobFluencyLabel(metrics.status)} - lotes ${metrics.processedBatches}/${planned}${size} - prom ${average} - max ${max}${yieldText}`;
+}
+
+function getBimJobFluencyLabel(status: NonNullable<ReturnType<typeof getBimJobFluencyMetrics>>["status"]) {
+  if (status === "critical") return "critica";
+  if (status === "warning") return "alerta";
+  return "ok";
+}
+
+function formatBimReadinessTone(tone: BimReadinessTone) {
+  if (tone === "ok") return "Listo";
+  if (tone === "critical") return "Pendiente";
+  return "Parcial";
+}
+
+function formatBimJobDurationMs(milliseconds: number) {
+  const value = Math.max(0, Math.round(milliseconds));
+  if (value < 1000) {
+    return `${value}ms`;
+  }
+  return `${(value / 1000).toFixed(1)}s`;
+}
+
+interface BimJobArtifactLink {
+  id: string;
+  name: string;
+  kind: string;
+}
+
+function getBimJobArtifacts(job: BimJobRecord): BimJobArtifactLink[] {
+  const artifacts = job.result.artifacts;
+  if (!Array.isArray(artifacts)) {
+    return [];
+  }
+  return artifacts.flatMap((artifact) => {
+    if (!artifact || typeof artifact !== "object") {
+      return [];
+    }
+    const source = artifact as Record<string, unknown>;
+    const id = typeof source.id === "string" ? source.id.trim() : "";
+    if (!id) {
+      return [];
+    }
+    const rawName = typeof source.name === "string" ? source.name.trim() : "";
+    const rawKind = typeof source.kind === "string" ? source.kind.trim() : "";
+    return [{
+      id,
+      name: rawName || id,
+      kind: rawKind || "artefacto",
+    }];
+  });
+}
+
+function getBimArtifactDownloadUrl(jobId: string, artifactId: string) {
+  return `/api/bim/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}/download`;
+}
+
 function getNavLabel(view: ViewKey) {
   if (view === "itemizado") return "Resumen";
   if (view === "presupuesto") return "Presupuestos";
+  if (view === "base-recursos") return "Base de Recursos";
+  if (view === "analisis-costos-unitarios") return "Analisis Costos Unitarios";
+  if (view === "formula-polinomica") return "Formula Polinomica";
   if (view === "control-bim") return "Control BIM";
   if (view === "auditoria") return "Auditoria";
   if (view === "usuarios") return "Usuarios";

@@ -1828,6 +1828,360 @@ select {
   font-size: 15px;
 }
 
+.bim-job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.bim-readiness-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.bim-readiness-card--ok {
+  border-color: rgba(32, 113, 79, 0.35);
+}
+
+.bim-readiness-card--warning {
+  border-color: rgba(154, 103, 0, 0.28);
+}
+
+.bim-readiness-card--critical {
+  border-color: var(--danger-border);
+}
+
+.bim-readiness-head,
+.bim-readiness-foot {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.bim-readiness-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.bim-readiness-head span,
+.bim-readiness-foot {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bim-readiness-badge {
+  border: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 800;
+  min-width: 84px;
+  padding: 6px 8px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.bim-readiness-badge--ok,
+.bim-readiness-check--ok {
+  background: #f0f8f4;
+  border-color: rgba(32, 113, 79, 0.28);
+  color: #20714f;
+}
+
+.bim-readiness-badge--warning,
+.bim-readiness-check--warning {
+  background: #fff8e6;
+  border-color: rgba(154, 103, 0, 0.28);
+  color: #875c00;
+}
+
+.bim-readiness-badge--critical,
+.bim-readiness-check--critical {
+  background: #fff1f1;
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.bim-readiness-check-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.bim-readiness-check {
+  border: 1px solid var(--line);
+  display: grid;
+  gap: 3px;
+  min-height: 48px;
+  padding: 8px 10px;
+}
+
+.bim-readiness-check small {
+  color: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.bim-readiness-check strong {
+  color: inherit;
+  font-size: 13px;
+}
+
+.bim-job-empty {
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+}
+
+.bim-job-empty strong {
+  color: var(--text);
+}
+
+.bim-job-list {
+  display: grid;
+  gap: 10px;
+}
+
+.bim-job-summary-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.bim-job-summary-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+}
+
+.bim-job-summary-pill {
+  align-items: center;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 8px 10px;
+}
+
+.bim-job-summary-pill small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.bim-job-summary-pill strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.bim-job-summary-pill.is-active {
+  border-color: rgba(20, 75, 122, 0.24);
+}
+
+.bim-job-summary-pill.is-warn {
+  border-color: var(--danger-border);
+}
+
+.bim-job-bridge-wait {
+  align-items: center;
+  background: rgba(223, 167, 57, 0.12);
+  border: 1px solid rgba(223, 167, 57, 0.42);
+  color: var(--text);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 9px 12px;
+}
+
+.bim-job-bridge-wait strong {
+  font-size: 12px;
+}
+
+.bim-job-bridge-wait span {
+  color: var(--muted);
+  flex: 1 1 220px;
+  font-size: 12px;
+  text-align: right;
+}
+
+.bim-job-bridge-wait em {
+  color: var(--text);
+  flex: 1 1 100%;
+  font-size: 12px;
+  font-style: normal;
+  text-align: right;
+}
+
+.bim-job-bridge-wait--critical {
+  background: rgba(188, 72, 72, 0.12);
+  border-color: var(--danger-border);
+}
+
+.bim-job-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+}
+
+.bim-job-card--completed {
+  border-color: rgba(32, 113, 79, 0.35);
+}
+
+.bim-job-card--failed,
+.bim-job-card--cancelled {
+  border-color: var(--danger-border);
+}
+
+.bim-job-card-head,
+.bim-job-meta {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.bim-job-meta {
+  flex-wrap: wrap;
+}
+
+.bim-job-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.bim-job-card-head > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.bim-job-card-head span,
+.bim-job-meta span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bim-job-timing {
+  flex: 1;
+  min-width: 160px;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.bim-job-progress {
+  background: #e7edf3;
+  border-radius: 999px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.bim-job-progress span {
+  background: var(--accent);
+  display: block;
+  height: 100%;
+  transition: width 180ms ease;
+}
+
+.bim-job-fluency {
+  align-items: center;
+  background: #f7fafc;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 28px;
+  overflow-wrap: anywhere;
+  padding: 5px 8px;
+}
+
+.bim-job-fluency--ok {
+  background: #f0f8f4;
+  border-color: rgba(32, 113, 79, 0.28);
+  color: #20714f;
+}
+
+.bim-job-fluency--warning {
+  background: #fff8e6;
+  border-color: rgba(154, 103, 0, 0.28);
+  color: #875c00;
+}
+
+.bim-job-fluency--critical {
+  background: #fff1f1;
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.bim-job-artifacts {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+}
+
+.bim-job-artifact-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bim-job-artifact-link {
+  align-items: center;
+  background: #f5f9fc;
+  border: 1px solid var(--line);
+  color: var(--accent-dark);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 28px;
+  padding: 4px 8px;
+  text-decoration: none;
+}
+
+.bim-job-artifact-link:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.bim-job-log {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+}
+
+.bim-job-log__line {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bim-job-log__line--error {
+  color: var(--danger);
+}
+
+.bim-job-log__line--warn {
+  color: #9a6700;
+}
+
 .bim-latest-grid {
   display: grid;
   gap: 8px;
@@ -3422,6 +3776,460 @@ textarea.cell-field {
 
 .partial-cell--subtotal {
   color: var(--text);
+}
+
+.apu-detail-row td {
+  padding: 0 8px 12px;
+  background:
+    linear-gradient(90deg, rgba(32, 113, 79, 0.05), rgba(32, 113, 79, 0)),
+    var(--panel);
+  border-bottom-color: var(--line);
+}
+
+.apu-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 12px 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.apu-panel-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.apu-panel-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.apu-panel-head strong {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.apu-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.apu-total {
+  display: inline-grid;
+  gap: 2px;
+  justify-items: end;
+  min-width: 124px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.apu-total strong {
+  color: var(--accent-strong);
+  font-size: 15px;
+}
+
+.apu-performance-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
+.apu-performance-field {
+  display: grid;
+  gap: 3px;
+  min-width: 118px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.apu-performance-input {
+  width: 118px;
+  text-align: right;
+}
+
+.apu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.apu-add-button,
+.apu-remove-button {
+  min-height: 28px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.apu-add-button {
+  padding: 0 10px;
+}
+
+.apu-add-button:hover,
+.apu-remove-button:hover {
+  border-color: var(--focus-border);
+  background: var(--hover);
+}
+
+.apu-remove-button {
+  padding: 0 8px;
+  color: var(--danger);
+}
+
+.apu-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--table-border);
+}
+
+.apu-table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: collapse;
+}
+
+.apu-table th,
+.apu-table td {
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--table-border);
+  text-align: left;
+}
+
+.apu-table th {
+  background: var(--surface-alt);
+  color: var(--table-head-text);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.apu-table tr:last-child td {
+  border-bottom: none;
+}
+
+.apu-category-row td {
+  background: var(--heading-level-4-bg);
+  color: var(--heading-level-4-text);
+  font-weight: 700;
+}
+
+.apu-empty-row td {
+  padding: 14px;
+  color: var(--muted);
+}
+
+.apu-field {
+  min-height: 26px;
+  border-radius: 6px;
+}
+
+.apu-field--description {
+  min-width: 260px;
+}
+
+.apu-field--crew {
+  min-width: 92px;
+}
+
+.apu-field--calculated {
+  background: var(--surface-alt);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.apu-partial-cell {
+  min-width: 116px;
+  white-space: nowrap;
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.apu-readonly-mark {
+  color: var(--muted);
+}
+
+.metrado-detail-row td {
+  padding: 0 8px 12px;
+  background:
+    linear-gradient(90deg, rgba(47, 102, 179, 0.06), rgba(47, 102, 179, 0)),
+    var(--panel);
+  border-bottom-color: var(--line);
+}
+
+.metrado-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 12px 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.metrado-panel-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.metrado-panel-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.metrado-table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+}
+
+.metrado-table th,
+.metrado-table td {
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--table-border);
+  text-align: left;
+}
+
+.metrado-table th {
+  background: var(--surface-alt);
+  color: var(--table-head-text);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.apu-subpartida-select {
+  margin-top: 4px;
+  min-width: 260px;
+}
+
+.budget-summary-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  padding: 10px;
+}
+
+.budget-summary-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.budget-summary-metric {
+  display: grid;
+  gap: 3px;
+  min-height: 46px;
+  border: 1px solid var(--line);
+  background: var(--surface-alt);
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.budget-summary-metric strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.budget-summary-metric.is-strong strong {
+  color: var(--accent-strong);
+}
+
+.budget-settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
+.budget-setting-field {
+  display: grid;
+  gap: 3px;
+  min-width: 116px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.budget-setting-field input {
+  text-align: right;
+}
+
+.budget-setting-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.polynomial-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.polynomial-head {
+  display: grid;
+  gap: 10px;
+}
+
+.polynomial-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+}
+
+.polynomial-section {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.resources-panel {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+}
+
+.resources-summary {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.resources-summary-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.resources-summary-pill strong {
+  color: var(--accent-strong);
+  font-size: 16px;
+}
+
+.resources-sections {
+  display: grid;
+  gap: 12px;
+}
+
+.resources-section {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.resources-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.resources-section-head div {
+  display: grid;
+  gap: 2px;
+}
+
+.resources-section-head strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.resources-section-head span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.resources-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--table-border);
+}
+
+.resources-table {
+  width: 100%;
+  min-width: 800px;
+  border-collapse: collapse;
+}
+
+.resources-table th,
+.resources-table td {
+  padding: 6px 7px;
+  border-bottom: 1px solid var(--table-border);
+  text-align: left;
+}
+
+.resources-table th {
+  background: var(--surface-alt);
+  color: var(--table-head-text);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.resources-table tr:last-child td {
+  border-bottom: none;
+}
+
+.resource-field {
+  min-height: 28px;
+  border-radius: 6px;
+}
+
+.resource-field--description {
+  min-width: 320px;
+}
+
+.resources-empty-row td {
+  padding: 14px;
+  color: var(--muted);
+}
+
+.apu-remove-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .is-empty {

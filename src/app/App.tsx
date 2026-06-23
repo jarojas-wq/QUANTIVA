@@ -22,6 +22,9 @@ export default function App() {
         <Route element={<ProtectedRoute />}>
           <Route path="/itemizado" element={<QuantivaWorkspace />} />
           <Route path="/presupuesto" element={<QuantivaWorkspace />} />
+          <Route path="/base-recursos" element={<QuantivaWorkspace />} />
+          <Route path="/analisis-costos-unitarios" element={<QuantivaWorkspace />} />
+          <Route path="/formula-polinomica" element={<QuantivaWorkspace />} />
           <Route path="/control-bim" element={<QuantivaWorkspace />} />
           <Route path="/auditoria" element={<QuantivaWorkspace />} />
           <Route path="/usuarios" element={<QuantivaWorkspace />} />

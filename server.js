@@ -5,6 +5,86 @@ import path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import mysql from "mysql2/promise";
+import {
+  buildBimJobCacheKey as buildBimJobCacheKeyDomain,
+  shouldReadBimJobCache as shouldReadBimJobCacheDomain,
+  shouldRefreshBimJobCache as shouldRefreshBimJobCacheDomain,
+  shouldPersistBimJobCache as shouldPersistBimJobCacheDomain,
+  shouldReuseActiveBimJob as shouldReuseActiveBimJobDomain,
+} from "./src/application/budget/bim-job-cache-domain.mjs";
+import {
+  decodeBimArtifactContent,
+  hasBimArtifactContent,
+  hasBimArtifactReference,
+  isBimArtifactRedirectHostAllowed,
+  normalizeAllowedBimArtifactRedirectUrl as normalizeAllowedBimArtifactRedirectUrlDomain,
+  normalizeIncomingBimArtifacts,
+  parseBimArtifactAllowedRedirectHosts as parseBimArtifactAllowedRedirectHostsDomain,
+  resolveRemoteBimArtifactDownloadUrl as resolveRemoteBimArtifactDownloadUrlDomain,
+  sanitizeBimArtifactName,
+} from "./src/application/budget/bim-artifact-domain.mjs";
+import {
+  createBimBridgeClaimAccessDecision,
+  normalizeBimBridgeRequestedBy,
+} from "./src/application/budget/bim-bridge-access-domain.mjs";
+import {
+  normalizeBimBridgePresenceTtlSeconds,
+  normalizeIncomingBimBridgeHeartbeat,
+  summarizeBimBridgePresence,
+} from "./src/application/budget/bim-bridge-presence-domain.mjs";
+import {
+  createBimJobStaleExpirationPlan,
+  normalizeBimJobStaleMinutes,
+} from "./src/application/budget/bim-job-stale-domain.mjs";
+import {
+  createBimJobCancelTransition,
+  createBimJobProgressDecision,
+  createBimJobRetryDecision,
+  isFinishedBimJobStatus,
+} from "./src/application/budget/bim-job-state-domain.mjs";
+import { shouldEmitBimJobSseUpdate } from "./src/application/budget/bim-job-events-domain.mjs";
+import { createBimJobDetailResponse } from "./src/application/budget/bim-job-query-domain.mjs";
+import {
+  canCreateBimApplyJobFromPreview as canCreateBimApplyJobFromPreviewDomain,
+  getDirectBimApplyJobCreateIssue,
+  normalizeBimApplyPlan,
+  resolveBimApplyJobBatchSize,
+} from "./src/application/budget/bim-apply-plan-domain.mjs";
+import {
+  BimJobOwnershipError,
+  canAccessBimJobOperationsForClaim,
+  canReportBimJobProgressForClaim,
+  canWriteBimJobArtifactsForClaim,
+} from "./src/application/budget/bim-job-ownership-domain.mjs";
+import {
+  detachBimJobOperationsForStorage,
+  normalizeBimJobOperationSource,
+  normalizeBimJobOperationsUpload,
+  normalizeBimJobOperationsForStorage,
+} from "./src/application/budget/bim-job-operations-domain.mjs";
+import {
+  getBimJobTargetCommandIssue,
+  normalizeBimJobCommandType,
+  normalizeBimJobLogLevel,
+  normalizeBimJobStatus,
+  normalizeBimJobTargetMode,
+  normalizeIncomingBimClaimIdentity,
+  normalizeIncomingBimJobCreate,
+  normalizeIncomingBimJobProgress,
+  normalizeOptionalBimJobCommandType,
+} from "./src/application/budget/bim-job-command-domain.mjs";
+import {
+  canClaimBimJobForActiveModel,
+  getBimBridgeClaimModelIdentityIssue,
+  getBimJobCreateModelIdentityIssue,
+} from "./src/application/budget/bim-job-model-identity-domain.mjs";
+import {
+  buildRevitImportStateFromState as buildRevitImportStateFromStateDomain,
+  normalizeRevitImportRows,
+} from "./src/application/budget/bim-revit-import-domain.mjs";
+import { normalizeIncomingRevitExport } from "./src/application/budget/bim-revit-export-domain.mjs";
+import { createBimParameterWritePlan } from "./src/application/budget/bim-parameter-operations-domain.mjs";
+import { createBackendBimReadinessSnapshot } from "./src/application/budget/bim-readiness-api-domain.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadLocalEnv(path.join(__dirname, ".env"));
@@ -20,12 +100,61 @@ const webSessionCookieName = String(process.env.ACCESS_COOKIE_NAME || "mtr2_sess
 const PROJECT_VIEW_ACCESS_KEYS = [
   "itemizado",
   "presupuesto",
+  "base-recursos",
+  "analisis-costos-unitarios",
+  "formula-polinomica",
   "control-bim",
   "auditoria",
   "exportaciones-rvt",
   "exportacion-presupuesto",
 ];
 const DEFAULT_PROJECT_VIEW_ACCESS_KEYS = [...PROJECT_VIEW_ACCESS_KEYS];
+const APU_CATEGORY_KEYS = ["mano-obra", "materiales", "equipos", "subcontratos", "otros"];
+const APU_WORKDAY_HOURS = 8;
+const BIM_JOB_STATUSES = ["queued", "claimed", "running", "applying", "completed", "failed", "cancelled"];
+const BIM_JOB_TARGET_MODES = ["active-revit", "cloud-model"];
+const BIM_JOB_ACTIVE_REUSE_STATUSES = ["queued", "claimed", "running", "applying"];
+const BIM_JOB_CREATE_LOCK_TIMEOUT_SECONDS = clampInteger(process.env.BIM_JOB_CREATE_LOCK_TIMEOUT_SECONDS, 1, 60, 8);
+const BIM_JOB_STALE_MINUTES = normalizeBimJobStaleMinutes(process.env.BIM_JOB_STALE_MINUTES);
+const BIM_JOB_SWEEP_INTERVAL_MS = clampInteger(process.env.BIM_JOB_SWEEP_INTERVAL_MS, 10000, 3600000, 60000);
+const BIM_BRIDGE_PRESENCE_TTL_SECONDS = normalizeBimBridgePresenceTtlSeconds(process.env.BIM_BRIDGE_PRESENCE_TTL_SECONDS);
+const BIM_JOB_SSE_POLL_MS = clampInteger(process.env.BIM_JOB_SSE_POLL_MS, 500, 30000, 1500);
+const BIM_JOB_SSE_RETRY_MS = clampInteger(process.env.BIM_JOB_SSE_RETRY_MS, 1000, 60000, 3000);
+const BIM_JOB_OPERATION_PAGE_SIZE = 1000;
+const BIM_ARTIFACT_STORAGE_DIR = path.resolve(__dirname, process.env.BIM_ARTIFACT_STORAGE_DIR || path.join("data", "bim-artifacts"));
+const BIM_ARTIFACT_MAX_BYTES = clampInteger(process.env.BIM_ARTIFACT_MAX_BYTES, 1024, 50 * 1024 * 1024, 5 * 1024 * 1024);
+const BIM_ARTIFACT_STORAGE_PROVIDERS = ["local", "cloud-storage", "aps"];
+const BIM_ARTIFACT_ALLOWED_REDIRECT_HOSTS = new Set(parseBimArtifactAllowedRedirectHosts(process.env.BIM_ARTIFACT_ALLOWED_REDIRECT_HOSTS));
+const BIM_JOB_SELECT_COLUMNS = `
+        j.MTRD_BimJob_ID AS internal_id,
+        j.MTRD_BimJob_UID AS job_uid,
+        p.MTRD_Proyecto_UID AS project_uid,
+        j.MTRD_BimJob_TargetMode AS target_mode,
+        j.MTRD_BimJob_CommandType AS command_type,
+        j.MTRD_BimJob_Status AS status_name,
+        j.MTRD_BimJob_Stage AS stage_name,
+        j.MTRD_BimJob_Percent AS percent_value,
+        j.MTRD_BimJob_PayloadJson AS payload_json,
+        j.MTRD_BimJob_ModelIdentityJson AS model_identity_json,
+        j.MTRD_BimJob_ModelKeyHash AS model_key_hash,
+        j.MTRD_BimJob_ResultJson AS result_json,
+        j.MTRD_BimJob_Error AS error_text,
+        j.MTRD_BimJob_CreadoPor AS created_by,
+        j.MTRD_BimJob_ClaimedBy AS claimed_by,
+        j.MTRD_BimJob_ClaimedAt AS claimed_at,
+        j.MTRD_BimJob_CompletedAt AS completed_at,
+        j.MTRD_BimJob_CreadoEn AS created_at,
+        j.MTRD_BimJob_ActualizadoEn AS updated_at`;
+
+class BimJobCreationLockError extends Error {
+  constructor(lockName) {
+    super(`No se pudo tomar el bloqueo de creacion BIM para ${lockName}. Intenta nuevamente en unos segundos.`);
+    this.name = "BimJobCreationLockError";
+    this.code = "BIM_JOB_CREATE_LOCK_TIMEOUT";
+    this.statusCode = 503;
+    this.lockName = lockName;
+  }
+}
 
 fs.mkdirSync(dataDir, { recursive: true });
 
@@ -318,7 +447,7 @@ const server = http.createServer(async (request, response) => {
       if (typeof storage.loadRevitImportState !== "function") {
         const payload = await storage.loadState();
         const scopedPayload = authorizedByApiKey ? payload : filterStateByUserProjects(payload, session.user);
-        const compact = buildRevitImportStateFromState(scopedPayload, url.searchParams);
+        const compact = buildRevitImportStateFromStateDomain(scopedPayload, url.searchParams);
         if (!compact.project) {
           respondJson(response, 404, {
             ok: false,
@@ -415,6 +544,566 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (url.pathname === "/api/bim/readiness") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const bridgeAuthorized = isAuthorizedRevitIngestRequest(request);
+      let session = null;
+      if (!bridgeAuthorized) {
+        session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+        if (!session) {
+          return;
+        }
+      }
+      const readiness = createBackendBimReadinessSnapshot(process.env, {
+        baseUrl: resolveRequestBaseUrl(request),
+        storageKind: storage.kind,
+        storageLabel: storage.label,
+        authenticatedBy: bridgeAuthorized ? "bridge-api-key" : "session",
+        userRole: session?.user?.role || "",
+      });
+      respondJson(response, 200, { ok: true, readiness });
+      return;
+    }
+
+    if (url.pathname === "/api/bim/jobs") {
+      if (request.method === "GET") {
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+        if (!session) {
+          return;
+        }
+        const projectId = String(url.searchParams.get("projectId") || "").trim();
+        if (projectId && !userCanAccessProject(session.user, projectId)) {
+          respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+          return;
+        }
+        const jobs = await storage.listBimJobs({
+          projectId,
+          limit: Number.parseInt(url.searchParams.get("limit") || "25", 10),
+        });
+        respondJson(response, 200, { ok: true, jobs });
+        return;
+      }
+
+      if (request.method === "POST") {
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "editor");
+        if (!session) {
+          return;
+        }
+        const payload = await readJsonBody(request);
+        const normalized = normalizeIncomingBimJobCreate(payload);
+        if (!normalized.projectId) {
+          respondJson(response, 400, { ok: false, error: "projectId es obligatorio para crear un job BIM." });
+          return;
+        }
+        const targetCommandIssue = getBimJobTargetCommandIssue(normalized);
+        if (targetCommandIssue) {
+          respondJson(response, 400, { ok: false, error: targetCommandIssue });
+          return;
+        }
+        const directApplyIssue = getDirectBimApplyJobCreateIssue(normalized);
+        if (directApplyIssue) {
+          respondJson(response, 400, { ok: false, error: directApplyIssue });
+          return;
+        }
+        const modelIdentityIssue = getBimJobCreateModelIdentityIssue(normalized);
+        if (modelIdentityIssue) {
+          respondJson(response, 400, { ok: false, error: modelIdentityIssue });
+          return;
+        }
+        if (!userCanAccessProject(session.user, normalized.projectId)) {
+          respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+          return;
+        }
+        const job = await storage.createBimJob(normalized, {
+          userName: session.user.displayName || session.user.email || "Usuario",
+        });
+        respondJson(response, 201, { ok: true, job });
+        return;
+      }
+
+      respondJson(response, 405, { error: "Metodo no permitido." });
+      return;
+    }
+
+    if (url.pathname === "/api/bim/jobs/summary") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+      if (!session) {
+        return;
+      }
+      const projectId = String(url.searchParams.get("projectId") || "").trim();
+      if (!projectId) {
+        respondJson(response, 400, { ok: false, error: "projectId es obligatorio para resumir la cola BIM." });
+        return;
+      }
+      if (!userCanAccessProject(session.user, projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      const summary = await storage.getBimJobQueueSummary({ projectId });
+      respondJson(response, 200, { ok: true, summary });
+      return;
+    }
+
+    const bimJobArtifactDownloadRoute = url.pathname.match(/^\/api\/bim\/jobs\/([^/]+)\/artifacts\/([^/]+)\/download$/);
+    if (bimJobArtifactDownloadRoute) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+      if (!session) {
+        return;
+      }
+      const jobUid = decodeURIComponent(bimJobArtifactDownloadRoute[1] || "").trim();
+      const artifactUid = decodeURIComponent(bimJobArtifactDownloadRoute[2] || "").trim();
+      const job = await storage.loadBimJob(jobUid);
+      if (!job) {
+        respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+        return;
+      }
+      if (!userCanAccessProject(session.user, job.projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      const artifact = await storage.loadBimJobArtifact(jobUid, artifactUid);
+      if (!artifact) {
+        respondJson(response, 404, { ok: false, error: "No se encontro el artefacto BIM." });
+        return;
+      }
+      await streamBimArtifactDownload(request, response, artifact);
+      return;
+    }
+
+    const bimJobRoute = url.pathname.match(/^\/api\/bim\/jobs\/([^/]+)(?:\/(events|cancel|retry|apply|artifacts))?$/);
+    if (bimJobRoute) {
+      const jobUid = decodeURIComponent(bimJobRoute[1] || "").trim();
+      const action = bimJobRoute[2] || "";
+      if (action === "events") {
+        if (request.method !== "GET") {
+          respondJson(response, 405, { error: "Metodo no permitido." });
+          return;
+        }
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+        if (!session) {
+          return;
+        }
+        const job = await storage.loadBimJob(jobUid);
+        if (!job) {
+          respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+          return;
+        }
+        if (!userCanAccessProject(session.user, job.projectId)) {
+          respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+          return;
+        }
+        await streamBimJobEvents(request, response, storage, jobUid);
+        return;
+      }
+
+      if (action === "cancel") {
+        if (request.method !== "POST") {
+          respondJson(response, 405, { error: "Metodo no permitido." });
+          return;
+        }
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "editor");
+        if (!session) {
+          return;
+        }
+        const job = await storage.loadBimJob(jobUid);
+        if (!job) {
+          respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+          return;
+        }
+        if (!userCanAccessProject(session.user, job.projectId)) {
+          respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+          return;
+        }
+        const cancelled = await storage.cancelBimJob(jobUid, {
+          userName: session.user.displayName || session.user.email || "Usuario",
+        });
+        respondJson(response, 200, { ok: true, job: cancelled });
+        return;
+      }
+
+      if (action === "retry") {
+        if (request.method !== "POST") {
+          respondJson(response, 405, { error: "Metodo no permitido." });
+          return;
+        }
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "editor");
+        if (!session) {
+          return;
+        }
+        const job = await storage.loadBimJob(jobUid);
+        if (!job) {
+          respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+          return;
+        }
+        if (!userCanAccessProject(session.user, job.projectId)) {
+          respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+          return;
+        }
+        const retryDecision = createBimJobRetryDecision(job.status, {
+          commandType: job.commandType,
+        });
+        if (!retryDecision.canRetry) {
+          respondJson(response, 409, { ok: false, error: retryDecision.reason });
+          return;
+        }
+        const retriedJob = await storage.retryBimJob(jobUid, {
+          userName: session.user.displayName || session.user.email || "Usuario",
+        });
+        if (!retriedJob) {
+          respondJson(response, 409, { ok: false, error: retryDecision.reason || "No se pudo reintentar el job BIM." });
+          return;
+        }
+        respondJson(response, 201, { ok: true, job: retriedJob });
+        return;
+      }
+
+      if (action === "apply") {
+        if (request.method !== "POST") {
+          respondJson(response, 405, { error: "Metodo no permitido." });
+          return;
+        }
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "editor");
+        if (!session) {
+          return;
+        }
+        const job = await storage.loadBimJob(jobUid);
+        if (!job) {
+          respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+          return;
+        }
+        if (!userCanAccessProject(session.user, job.projectId)) {
+          respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+          return;
+        }
+        if (!canCreateBimApplyJob(job)) {
+          respondJson(response, 409, { ok: false, error: "Solo se puede aplicar desde un preview BIM completado para Revit activo y con identidad de modelo estable." });
+          return;
+        }
+        const applyJob = await storage.createBimApplyJobFromPreview(jobUid, {
+          userName: session.user.displayName || session.user.email || "Usuario",
+        });
+        if (!applyJob) {
+          respondJson(response, 409, { ok: false, error: "No se pudo crear el job de aplicacion desde el preview indicado." });
+          return;
+        }
+        respondJson(response, 201, { ok: true, job: applyJob });
+        return;
+      }
+
+      if (action === "artifacts") {
+        if (request.method !== "GET") {
+          respondJson(response, 405, { error: "Metodo no permitido." });
+          return;
+        }
+        const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+        if (!session) {
+          return;
+        }
+        const job = await storage.loadBimJob(jobUid);
+        if (!job) {
+          respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+          return;
+        }
+        if (!userCanAccessProject(session.user, job.projectId)) {
+          respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+          return;
+        }
+        const artifacts = await storage.listBimJobArtifacts(jobUid);
+        respondJson(response, 200, { ok: true, artifacts });
+        return;
+      }
+
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const session = await ensureAuthorizedRequest(accessControl, request, response, "viewer");
+      if (!session) {
+        return;
+      }
+      const job = await storage.loadBimJob(jobUid);
+      const detailResponse = createBimJobDetailResponse(job);
+      if (!detailResponse.ok) {
+        respondJson(response, detailResponse.status, detailResponse.body);
+        return;
+      }
+      if (!userCanAccessProject(session.user, detailResponse.body.job.projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      respondJson(response, detailResponse.status, detailResponse.body);
+      return;
+    }
+
+    if (url.pathname === "/api/bim/bridge/summary") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const bridgeAuth = await authorizeBimBridgeRequest(request, response);
+      if (!bridgeAuth) {
+        return;
+      }
+      const projectId = String(url.searchParams.get("projectId") || url.searchParams.get("projectUid") || "").trim();
+      if (!projectId) {
+        respondJson(response, 400, { ok: false, error: "projectId es obligatorio para resumir la cola BIM del bridge." });
+        return;
+      }
+      if (bridgeAuth.user && !userCanAccessProject(bridgeAuth.user, projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      const summary = await storage.getBimJobQueueSummary({ projectId });
+      respondJson(response, 200, { ok: true, summary });
+      return;
+    }
+
+    if (url.pathname === "/api/bim/bridge/heartbeat") {
+      if (request.method !== "POST") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const bridgeAuth = await authorizeBimBridgeRequest(request, response);
+      if (!bridgeAuth) {
+        return;
+      }
+      const payload = await readJsonBody(request);
+      const heartbeat = normalizeIncomingBimBridgeHeartbeat({
+        ...payload,
+        requestedBy: payload?.requestedBy || payload?.userEmail || bridgeAuth.user?.email || "",
+      });
+      if (!heartbeat.projectId) {
+        respondJson(response, 400, { ok: false, error: "projectId es obligatorio para registrar el heartbeat del bridge." });
+        return;
+      }
+      if (bridgeAuth.user && !userCanAccessProject(bridgeAuth.user, heartbeat.projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      const bridgePresence = await storage.saveBimBridgeHeartbeat(heartbeat);
+      respondJson(response, 200, { ok: true, bridgePresence });
+      return;
+    }
+
+    if (url.pathname === "/api/bim/bridge/commands") {
+      if (request.method !== "GET") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const bridgeAuth = await authorizeBimBridgeRequest(request, response);
+      if (!bridgeAuth) {
+        return;
+      }
+      const projectId = String(url.searchParams.get("projectId") || url.searchParams.get("projectUid") || "").trim();
+      if (bridgeAuth.user && projectId && !userCanAccessProject(bridgeAuth.user, projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      const targetMode = normalizeBimJobTargetMode(String(url.searchParams.get("targetMode") || "active-revit").trim());
+      const requestedBy = normalizeBimBridgeRequestedBy(
+        url.searchParams.get("requestedBy") || url.searchParams.get("userEmail") || bridgeAuth.user?.email || "",
+      );
+      const bridgeClaimAccess = await authorizeBimBridgeClaimAccess({
+        bridgeAuth,
+        targetMode,
+        requestedBy,
+        projectId,
+      });
+      if (!bridgeClaimAccess.ok) {
+        respondJson(response, bridgeClaimAccess.status, {
+          ok: false,
+          error: bridgeClaimAccess.error,
+          code: bridgeClaimAccess.code,
+        });
+        return;
+      }
+      const activeModelIdentity = normalizeIncomingBimClaimIdentity(url.searchParams);
+      const claimModelIdentityIssue = getBimBridgeClaimModelIdentityIssue(targetMode, activeModelIdentity);
+      if (claimModelIdentityIssue) {
+        respondJson(response, 400, { ok: false, error: claimModelIdentityIssue });
+        return;
+      }
+      const bridgeId = String(url.searchParams.get("bridgeId") || url.searchParams.get("workerId") || "revit-bridge").trim();
+      let bridgePresence = null;
+      if (targetMode === "active-revit") {
+        bridgePresence = await storage.saveBimBridgeHeartbeat({
+          bridgeId,
+          projectId,
+          requestedBy: bridgeClaimAccess.requestedByEmail || requestedBy,
+          activeModelIdentity,
+        });
+      }
+      const jobs = await storage.claimBimJobs({
+        projectId,
+        targetMode,
+        commandType: String(url.searchParams.get("commandType") || "").trim(),
+        bridgeId,
+        requestedBy: bridgeClaimAccess.requestedByEmail || requestedBy,
+        allowedProjectIds: bridgeClaimAccess.projectScope.projectIds,
+        allowAllProjects: bridgeClaimAccess.projectScope.allProjects,
+        requireProjectScope: bridgeClaimAccess.projectScope.required,
+        activeModelIdentity,
+        limit: Number.parseInt(url.searchParams.get("limit") || "1", 10),
+      });
+      respondJson(response, 200, { ok: true, jobs, bridgePresence });
+      return;
+    }
+
+    const bimBridgeOperationsRoute = url.pathname.match(/^\/api\/bim\/bridge\/jobs\/([^/]+)\/operations$/);
+    const bimBridgeProgressRoute = url.pathname.match(/^\/api\/bim\/bridge\/jobs\/([^/]+)\/progress$/);
+    const bimBridgeArtifactsRoute = url.pathname.match(/^\/api\/bim\/bridge\/jobs\/([^/]+)\/artifacts$/);
+    if (bimBridgeOperationsRoute) {
+      if (!["GET", "POST"].includes(request.method)) {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const bridgeAuth = await authorizeBimBridgeRequest(request, response);
+      if (!bridgeAuth) {
+        return;
+      }
+      const jobUidForOperations = decodeURIComponent(bimBridgeOperationsRoute[1] || "").trim();
+      const job = await storage.loadBimJob(jobUidForOperations);
+      if (!job) {
+        respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+        return;
+      }
+      if (bridgeAuth.user && !userCanAccessProject(bridgeAuth.user, job.projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      const bridgeId = String(url.searchParams.get("bridgeId") || url.searchParams.get("workerId") || "").trim();
+      if (!canAccessBimJobOperationsForClaim(job.claimedBy, bridgeId)) {
+        respondJson(response, 409, {
+          ok: false,
+          error: "El bridge no es propietario del job BIM solicitado.",
+          code: "BIM_JOB_OWNERSHIP_MISMATCH",
+        });
+        return;
+      }
+      if (request.method === "POST" && isFinishedBimJobStatus(job.status)) {
+        respondJson(response, 409, { ok: false, error: "No se pueden registrar operaciones en un job BIM finalizado." });
+        return;
+      }
+      if (request.method === "POST") {
+        const upload = normalizeBimJobOperationsUpload(await readJsonBody(request));
+        const page = await storage.saveBimJobOperationsUpload(jobUidForOperations, upload);
+        if (page === null) {
+          respondJson(response, 409, { ok: false, error: "No se pueden registrar operaciones en un job BIM finalizado." });
+          return;
+        }
+        respondJson(response, 200, { ok: true, ...page });
+        return;
+      }
+      const page = await storage.listBimJobOperations(jobUidForOperations, {
+        source: url.searchParams.get("source"),
+        offset: Number.parseInt(url.searchParams.get("offset") || "0", 10),
+        limit: Number.parseInt(url.searchParams.get("limit") || String(BIM_JOB_OPERATION_PAGE_SIZE), 10),
+      });
+      respondJson(response, 200, { ok: true, ...page });
+      return;
+    }
+
+    if (bimBridgeArtifactsRoute) {
+      if (request.method !== "POST") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const bridgeAuth = await authorizeBimBridgeRequest(request, response);
+      if (!bridgeAuth) {
+        return;
+      }
+      const payload = await readJsonBody(request);
+      const jobUidForArtifacts = decodeURIComponent(bimBridgeArtifactsRoute[1] || "").trim();
+      const job = await storage.loadBimJob(jobUidForArtifacts);
+      if (!job) {
+        respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+        return;
+      }
+      if (bridgeAuth.user && !userCanAccessProject(bridgeAuth.user, job.projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      let artifacts;
+      try {
+        artifacts = await storage.saveBimJobArtifacts(jobUidForArtifacts, payload?.artifacts, {
+          bridgeId: payload?.bridgeId || payload?.workerId || "bim-worker",
+        });
+      } catch (error) {
+        if (error instanceof BimJobOwnershipError) {
+          respondJson(response, error.statusCode, {
+            ok: false,
+            error: error.message,
+            code: error.code,
+          });
+          return;
+        }
+        throw error;
+      }
+      if (artifacts === null) {
+        respondJson(response, 409, { ok: false, error: "No se pueden registrar artefactos en un job BIM finalizado." });
+        return;
+      }
+      respondJson(response, 201, { ok: true, artifacts });
+      return;
+    }
+
+    if (bimBridgeProgressRoute) {
+      if (request.method !== "POST") {
+        respondJson(response, 405, { error: "Metodo no permitido." });
+        return;
+      }
+      const bridgeAuth = await authorizeBimBridgeRequest(request, response);
+      if (!bridgeAuth) {
+        return;
+      }
+      const payload = await readJsonBody(request);
+      const jobUidForProgress = decodeURIComponent(bimBridgeProgressRoute[1] || "").trim();
+      const existingJob = await storage.loadBimJob(jobUidForProgress);
+      if (!existingJob) {
+        respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+        return;
+      }
+      if (bridgeAuth.user && !userCanAccessProject(bridgeAuth.user, existingJob.projectId)) {
+        respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
+        return;
+      }
+      let job;
+      try {
+        job = await storage.updateBimJobProgress(
+          jobUidForProgress,
+          payload,
+          { bridgeId: payload?.bridgeId || payload?.workerId || "revit-bridge" },
+        );
+      } catch (error) {
+        if (error instanceof BimJobOwnershipError) {
+          respondJson(response, error.statusCode, {
+            ok: false,
+            error: error.message,
+            code: error.code,
+          });
+          return;
+        }
+        throw error;
+      }
+      if (!job) {
+        respondJson(response, 404, { ok: false, error: "No se encontro el job BIM." });
+        return;
+      }
+      respondJson(response, 200, { ok: true, job });
+      return;
+    }
+
     if (!["GET", "HEAD"].includes(request.method || "GET")) {
       respondJson(response, 405, { error: "Metodo no permitido." });
       return;
@@ -422,8 +1111,13 @@ const server = http.createServer(async (request, response) => {
 
     await serveStaticAsset(url.pathname, response, request.method || "GET");
   } catch (error) {
-    respondJson(response, 500, {
-      error: "No se pudo completar la solicitud.",
+    const statusCode = Number(error?.statusCode || 0) || 500;
+    respondJson(response, statusCode, {
+      ok: false,
+      error: statusCode >= 500
+        ? "No se pudo completar la solicitud."
+        : normalizeText(error?.message, "No se pudo completar la solicitud."),
+      code: normalizeText(error?.code, ""),
       detail: error instanceof Error ? error.message : String(error),
     });
   }
@@ -431,6 +1125,7 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(port, host, async () => {
   const health = await storage.getHealth();
+  startBimJobStaleSweep(storage);
   console.log(`Quantiva listo en http://${host}:${port}`);
   console.log(`Storage: ${storage.label}`);
   console.log(
@@ -443,6 +1138,32 @@ server.listen(port, host, async () => {
     console.log(`MySQL: ${health.host} / ${health.database}`);
   }
 });
+
+function startBimJobStaleSweep(storageAdapter) {
+  if (!storageAdapter || typeof storageAdapter.expireStaleBimJobs !== "function") {
+    return;
+  }
+  let sweepRunning = false;
+  const runSweep = async () => {
+    if (sweepRunning) {
+      return;
+    }
+    sweepRunning = true;
+    try {
+      const expiredCount = await storageAdapter.expireStaleBimJobs(BIM_JOB_STALE_MINUTES);
+      if (expiredCount > 0) {
+        console.log(`Jobs BIM expirados por falta de heartbeat: ${expiredCount}`);
+      }
+    } catch (error) {
+      console.warn(`No se pudo expirar jobs BIM estancados: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      sweepRunning = false;
+    }
+  };
+  void runSweep();
+  const interval = setInterval(() => void runSweep(), BIM_JOB_SWEEP_INTERVAL_MS);
+  interval.unref?.();
+}
 
 function createStorageAdapter() {
   return new MySQLStorage(buildMySqlConfig());
@@ -711,6 +1432,16 @@ class MySQLStorage {
     }
 
     const projectIds = projectRows.map((row) => row.project_id);
+    const [budgetConfigRows] = await this.pool.query(`
+      SELECT
+        MTRD_PresupuestoConfig_KEY_Proyecto AS project_id,
+        MTRD_PresupuestoConfig_GastosGeneralesPct AS gastos_generales_pct,
+        MTRD_PresupuestoConfig_UtilidadPct AS utilidad_pct,
+        MTRD_PresupuestoConfig_IgvPct AS igv_pct,
+        MTRD_PresupuestoConfig_IncluyeIgv AS incluye_igv
+      FROM MTRD_PresupuestoConfig
+      WHERE MTRD_PresupuestoConfig_KEY_Proyecto IN (?)
+    `, [projectIds]);
     const [itemRows] = await this.pool.query(`
       SELECT
         MTRD_Item_KEY_Proyecto AS project_id,
@@ -725,7 +1456,9 @@ class MySQLStorage {
         MTRD_Item_MetradoTradicional AS item_metrado_tradicional,
         MTRD_Item_MetradoBim AS item_metrado_bim,
         MTRD_Item_TipoMetrado AS item_tipo_metrado,
-        MTRD_Item_ReglaMetrado AS item_regla_metrado
+        MTRD_Item_ReglaMetrado AS item_regla_metrado,
+        MTRD_Item_RendimientoMO AS item_rendimiento_mo,
+        MTRD_Item_RendimientoEQ AS item_rendimiento_eq
       FROM MTRD_Item
       WHERE MTRD_Item_KEY_Proyecto IN (?)
       ORDER BY MTRD_Item_KEY_Proyecto ASC, MTRD_Item_Orden ASC
@@ -739,6 +1472,98 @@ class MySQLStorage {
       INNER JOIN MTRD_Item i ON i.MTRD_Item_ID = c.MTRD_ItemColapsado_KEY_Item
       WHERE c.MTRD_ItemColapsado_KEY_Proyecto IN (?)
       ORDER BY c.MTRD_ItemColapsado_KEY_Proyecto ASC, c.MTRD_ItemColapsado_ID ASC
+    `, [projectIds]);
+
+    const [apuRows] = await this.pool.query(`
+      SELECT
+        a.MTRD_ItemApuInsumo_KEY_Proyecto AS project_id,
+        i.MTRD_Item_UID AS item_uid,
+        a.MTRD_ItemApuInsumo_UID AS apu_uid,
+        a.MTRD_ItemApuInsumo_Orden AS apu_order,
+        a.MTRD_ItemApuInsumo_Categoria AS apu_category,
+        a.MTRD_ItemApuInsumo_RecursoUID AS apu_resource_uid,
+        a.MTRD_ItemApuInsumo_SubpartidaUID AS apu_subpartida_uid,
+        a.MTRD_ItemApuInsumo_Descripcion AS apu_descripcion,
+        a.MTRD_ItemApuInsumo_Unidad AS apu_unidad,
+        a.MTRD_ItemApuInsumo_Cuadrilla AS apu_cuadrilla,
+        a.MTRD_ItemApuInsumo_Cantidad AS apu_cantidad,
+        a.MTRD_ItemApuInsumo_PrecioUnitario AS apu_precio_unitario
+      FROM MTRD_ItemApuInsumo a
+      INNER JOIN MTRD_Item i ON i.MTRD_Item_ID = a.MTRD_ItemApuInsumo_KEY_Item
+      WHERE a.MTRD_ItemApuInsumo_KEY_Proyecto IN (?)
+      ORDER BY
+        a.MTRD_ItemApuInsumo_KEY_Proyecto ASC,
+        i.MTRD_Item_Orden ASC,
+        a.MTRD_ItemApuInsumo_Orden ASC
+    `, [projectIds]);
+
+    const [metradoRows] = await this.pool.query(`
+      SELECT
+        m.MTRD_ItemMetrado_KEY_Proyecto AS project_id,
+        i.MTRD_Item_UID AS item_uid,
+        m.MTRD_ItemMetrado_UID AS metrado_uid,
+        m.MTRD_ItemMetrado_Orden AS metrado_order,
+        m.MTRD_ItemMetrado_Descripcion AS metrado_descripcion,
+        m.MTRD_ItemMetrado_Veces AS metrado_veces,
+        m.MTRD_ItemMetrado_Largo AS metrado_largo,
+        m.MTRD_ItemMetrado_Ancho AS metrado_ancho,
+        m.MTRD_ItemMetrado_Alto AS metrado_alto,
+        m.MTRD_ItemMetrado_Parcial AS metrado_parcial
+      FROM MTRD_ItemMetrado m
+      INNER JOIN MTRD_Item i ON i.MTRD_Item_ID = m.MTRD_ItemMetrado_KEY_Item
+      WHERE m.MTRD_ItemMetrado_KEY_Proyecto IN (?)
+      ORDER BY
+        m.MTRD_ItemMetrado_KEY_Proyecto ASC,
+        i.MTRD_Item_Orden ASC,
+        m.MTRD_ItemMetrado_Orden ASC
+    `, [projectIds]);
+
+    const [unitCatalogRows] = await this.pool.query(`
+      SELECT
+        MTRD_UnidadCatalogo_KEY_Proyecto AS project_id,
+        MTRD_UnidadCatalogo_UID AS unit_uid,
+        MTRD_UnidadCatalogo_Orden AS unit_order,
+        MTRD_UnidadCatalogo_Codigo AS unit_codigo,
+        MTRD_UnidadCatalogo_Descripcion AS unit_descripcion
+      FROM MTRD_UnidadCatalogo
+      WHERE MTRD_UnidadCatalogo_KEY_Proyecto IN (?)
+      ORDER BY
+        MTRD_UnidadCatalogo_KEY_Proyecto ASC,
+        MTRD_UnidadCatalogo_Orden ASC
+    `, [projectIds]);
+
+    const [resourceCatalogRows] = await this.pool.query(`
+      SELECT
+        MTRD_RecursoCatalogo_KEY_Proyecto AS project_id,
+        MTRD_RecursoCatalogo_UID AS resource_uid,
+        MTRD_RecursoCatalogo_Orden AS resource_order,
+        MTRD_RecursoCatalogo_Categoria AS resource_category,
+        MTRD_RecursoCatalogo_Descripcion AS resource_descripcion,
+        MTRD_RecursoCatalogo_Unidad AS resource_unidad,
+        MTRD_RecursoCatalogo_PrecioUnitario AS resource_precio_unitario,
+        MTRD_RecursoCatalogo_GrupoPolinomicoUID AS resource_polynomial_group_uid
+      FROM MTRD_RecursoCatalogo
+      WHERE MTRD_RecursoCatalogo_KEY_Proyecto IN (?)
+      ORDER BY
+        MTRD_RecursoCatalogo_KEY_Proyecto ASC,
+        MTRD_RecursoCatalogo_Categoria ASC,
+        MTRD_RecursoCatalogo_Orden ASC
+    `, [projectIds]);
+
+    const [polynomialRows] = await this.pool.query(`
+      SELECT
+        MTRD_GrupoPolinomico_KEY_Proyecto AS project_id,
+        MTRD_GrupoPolinomico_UID AS polynomial_uid,
+        MTRD_GrupoPolinomico_Orden AS polynomial_order,
+        MTRD_GrupoPolinomico_Codigo AS polynomial_codigo,
+        MTRD_GrupoPolinomico_Descripcion AS polynomial_descripcion,
+        MTRD_GrupoPolinomico_Indice AS polynomial_indice,
+        MTRD_GrupoPolinomico_Categoria AS polynomial_categoria
+      FROM MTRD_GrupoPolinomico
+      WHERE MTRD_GrupoPolinomico_KEY_Proyecto IN (?)
+      ORDER BY
+        MTRD_GrupoPolinomico_KEY_Proyecto ASC,
+        MTRD_GrupoPolinomico_Orden ASC
     `, [projectIds]);
 
     const [auditRows] = await this.pool.query(`
@@ -798,7 +1623,9 @@ class MySQLStorage {
           MTRD_SnapshotItem_MetradoTradicional AS item_metrado_tradicional,
           MTRD_SnapshotItem_MetradoBim AS item_metrado_bim,
           MTRD_SnapshotItem_TipoMetrado AS item_tipo_metrado,
-          MTRD_SnapshotItem_ReglaMetrado AS item_regla_metrado
+          MTRD_SnapshotItem_ReglaMetrado AS item_regla_metrado,
+          MTRD_SnapshotItem_RendimientoMO AS item_rendimiento_mo,
+          MTRD_SnapshotItem_RendimientoEQ AS item_rendimiento_eq
         FROM MTRD_SnapshotItem
         WHERE MTRD_SnapshotItem_KEY_Snapshot IN (?)
         ORDER BY MTRD_SnapshotItem_KEY_Snapshot ASC, MTRD_SnapshotItem_Orden ASC
@@ -810,6 +1637,8 @@ class MySQLStorage {
         MTRD_RevitExport_KEY_Proyecto AS project_id,
         MTRD_RevitExport_ID AS export_id,
         MTRD_RevitExport_UID AS export_uid,
+        MTRD_RevitExport_DocumentoUID AS document_uid,
+        MTRD_RevitExport_ModeloGUID AS model_guid,
         MTRD_RevitExport_RutaModelo AS model_path,
         MTRD_RevitExport_RevitVersion AS revit_version,
         MTRD_RevitExport_AddinVersion AS addin_version,
@@ -838,7 +1667,13 @@ class MySQLStorage {
       : [[]];
 
     const itemsByProject = groupRowsByKey(itemRows, "project_id");
+    const budgetConfigByProject = new Map(budgetConfigRows.map((row) => [row.project_id, row]));
     const collapsedByProject = groupRowsByKey(collapsedRows, "project_id");
+    const apuItemsByItem = groupApuRowsByProjectItem(apuRows);
+    const metradoItemsByItem = groupMetradoRowsByProjectItem(metradoRows);
+    const unitCatalogByProject = groupRowsByKey(unitCatalogRows, "project_id");
+    const resourceCatalogByProject = groupRowsByKey(resourceCatalogRows, "project_id");
+    const polynomialGroupsByProject = groupRowsByKey(polynomialRows, "project_id");
     const auditsByProject = groupRowsByKey(auditRows, "project_id");
     const snapshotsByProject = groupRowsByKey(snapshotRows, "project_id");
     const snapshotItemsBySnapshot = groupRowsByKey(snapshotItemRows, "snapshot_id");
@@ -858,7 +1693,11 @@ class MySQLStorage {
 
     const projects = projectRows.map((projectRow) => {
       const projectItems = itemsByProject.get(projectRow.project_id) || [];
+      const projectBudgetConfig = budgetConfigByProject.get(projectRow.project_id) || null;
       const projectCollapsed = collapsedByProject.get(projectRow.project_id) || [];
+      const projectUnitCatalog = unitCatalogByProject.get(projectRow.project_id) || [];
+      const projectResourceCatalog = resourceCatalogByProject.get(projectRow.project_id) || [];
+      const projectPolynomialGroups = polynomialGroupsByProject.get(projectRow.project_id) || [];
       const projectAudits = auditsByProject.get(projectRow.project_id) || [];
       const projectSnapshots = snapshotsByProject.get(projectRow.project_id) || [];
       const projectRevitExports = revitExportsByProject.get(projectRow.project_id) || [];
@@ -877,6 +1716,8 @@ class MySQLStorage {
           metradoBim: normalizeDecimalString(entry.item_metrado_bim),
           tipoMetrado: entry.item_tipo_metrado || "",
           reglaMetrado: normalizeReglaMetrado(entry.item_tipo_metrado, entry.item_regla_metrado),
+          rendimientoManoObra: normalizeDecimalString(entry.item_rendimiento_mo),
+          rendimientoEquipos: normalizeDecimalString(entry.item_rendimiento_eq),
         })));
 
         return {
@@ -915,6 +1756,10 @@ class MySQLStorage {
           metradoBim: normalizeDecimalString(entry.item_metrado_bim),
           tipoMetrado: entry.item_tipo_metrado || "",
           reglaMetrado: normalizeReglaMetrado(entry.item_tipo_metrado, entry.item_regla_metrado),
+          rendimientoManoObra: normalizeDecimalString(entry.item_rendimiento_mo),
+          rendimientoEquipos: normalizeDecimalString(entry.item_rendimiento_eq),
+          apuItems: mapApuRowsToItems(apuItemsByItem.get(getApuProjectItemKey(entry.project_id, entry.item_uid)) || []),
+          metradoItems: mapMetradoRowsToItems(metradoItemsByItem.get(getApuProjectItemKey(entry.project_id, entry.item_uid)) || []),
         }))),
         auditEntries: projectAudits.map((entry) => ({
           id: `audit-${entry.audit_id}`,
@@ -931,10 +1776,16 @@ class MySQLStorage {
           timestamp: normalizeIsoString(entry.event_at),
         })),
         snapshots,
+        budgetSettings: mapBudgetConfigRowToSettings(projectBudgetConfig),
+        polynomialGroups: mapPolynomialRowsToGroups(projectPolynomialGroups),
+        unitCatalogItems: mapUnitCatalogRowsToItems(projectUnitCatalog),
+        resourceCatalogItems: mapResourceCatalogRowsToItems(projectResourceCatalog),
         latestRevitExport: latestRevitExport
           ? {
             id: latestRevitExport.export_id ?? latestRevitExport.id ?? null,
             uid: latestRevitExport.export_uid || latestRevitExport.uid || "",
+            documentUid: latestRevitExport.document_uid || latestRevitExport.documentUid || "",
+            modelGuid: latestRevitExport.model_guid || latestRevitExport.modelGuid || "",
             modelPath: latestRevitExport.model_path || latestRevitExport.modelPath || "",
             revitVersion: latestRevitExport.revit_version || latestRevitExport.revitVersion || "",
             addinVersion: latestRevitExport.addin_version || latestRevitExport.addinVersion || "",
@@ -1018,14 +1869,17 @@ class MySQLStorage {
         MTRD_Item_Costo AS item_costo,
         MTRD_Item_MetradoBim AS item_metrado_bim,
         MTRD_Item_TipoMetrado AS item_tipo_metrado,
-        MTRD_Item_ReglaMetrado AS item_regla_metrado
+        MTRD_Item_ReglaMetrado AS item_regla_metrado,
+        MTRD_Item_RendimientoMO AS item_rendimiento_mo,
+        MTRD_Item_RendimientoEQ AS item_rendimiento_eq
       FROM MTRD_Item
       WHERE MTRD_Item_KEY_Proyecto = ?
       ORDER BY MTRD_Item_Orden ASC
     `, [selectedProject.project_id]);
 
-    const rows = addCodigoPartidaToRows(itemRows.map((entry) => ({
+    const rows = normalizeRevitImportRows(itemRows.map((entry) => ({
       id: entry.item_uid,
+      itemUid: entry.item_uid,
       level: Number(entry.item_level || 0),
       codificacion: entry.item_codificacion || "",
       descripcion: normalizeDescriptionText(entry.item_descripcion),
@@ -1034,6 +1888,8 @@ class MySQLStorage {
       metradoBim: normalizeDecimalString(entry.item_metrado_bim),
       tipoMetrado: entry.item_tipo_metrado || "",
       reglaMetrado: normalizeReglaMetrado(entry.item_tipo_metrado, entry.item_regla_metrado),
+      rendimientoManoObra: normalizeDecimalString(entry.item_rendimiento_mo),
+      rendimientoEquipos: normalizeDecimalString(entry.item_rendimiento_eq),
     })));
 
     const project = {
@@ -1144,6 +2000,26 @@ class MySQLStorage {
           WHERE MTRD_ItemColapsado_KEY_Proyecto = ?
         `, [projectId]);
         await connection.query(`
+          DELETE FROM MTRD_ItemMetrado
+          WHERE MTRD_ItemMetrado_KEY_Proyecto = ?
+        `, [projectId]);
+        await connection.query(`
+          DELETE FROM MTRD_ItemApuInsumo
+          WHERE MTRD_ItemApuInsumo_KEY_Proyecto = ?
+        `, [projectId]);
+        await connection.query(`
+          DELETE FROM MTRD_UnidadCatalogo
+          WHERE MTRD_UnidadCatalogo_KEY_Proyecto = ?
+        `, [projectId]);
+        await connection.query(`
+          DELETE FROM MTRD_RecursoCatalogo
+          WHERE MTRD_RecursoCatalogo_KEY_Proyecto = ?
+        `, [projectId]);
+        await connection.query(`
+          DELETE FROM MTRD_GrupoPolinomico
+          WHERE MTRD_GrupoPolinomico_KEY_Proyecto = ?
+        `, [projectId]);
+        await connection.query(`
           DELETE FROM MTRD_AuditoriaItem
           WHERE MTRD_AuditoriaItem_KEY_Proyecto = ?
         `, [projectId]);
@@ -1159,7 +2035,97 @@ class MySQLStorage {
           WHERE MTRD_Snapshot_KEY_Proyecto = ?
         `, [projectId]);
 
-        const rows = Array.isArray(project.rows) ? project.rows : [];
+        const rows = resolveIncomingBudgetRows(project.rows);
+        const budgetSettings = normalizeIncomingBudgetSettings(project.budgetSettings);
+        await connection.query(`
+          INSERT INTO MTRD_PresupuestoConfig (
+            MTRD_PresupuestoConfig_KEY_Proyecto,
+            MTRD_PresupuestoConfig_GastosGeneralesPct,
+            MTRD_PresupuestoConfig_UtilidadPct,
+            MTRD_PresupuestoConfig_IgvPct,
+            MTRD_PresupuestoConfig_IncluyeIgv
+          ) VALUES (?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            MTRD_PresupuestoConfig_GastosGeneralesPct = VALUES(MTRD_PresupuestoConfig_GastosGeneralesPct),
+            MTRD_PresupuestoConfig_UtilidadPct = VALUES(MTRD_PresupuestoConfig_UtilidadPct),
+            MTRD_PresupuestoConfig_IgvPct = VALUES(MTRD_PresupuestoConfig_IgvPct),
+            MTRD_PresupuestoConfig_IncluyeIgv = VALUES(MTRD_PresupuestoConfig_IncluyeIgv)
+        `, [
+          projectId,
+          parseDecimal(budgetSettings.gastosGeneralesPercent),
+          parseDecimal(budgetSettings.utilidadPercent),
+          parseDecimal(budgetSettings.igvPercent),
+          budgetSettings.includeIgv ? 1 : 0,
+        ]);
+
+        const polynomialGroups = normalizeIncomingPolynomialGroups(project.polynomialGroups);
+        for (let groupIndex = 0; groupIndex < polynomialGroups.length; groupIndex += 1) {
+          const group = polynomialGroups[groupIndex];
+          await connection.query(`
+            INSERT INTO MTRD_GrupoPolinomico (
+              MTRD_GrupoPolinomico_KEY_Proyecto,
+              MTRD_GrupoPolinomico_UID,
+              MTRD_GrupoPolinomico_Orden,
+              MTRD_GrupoPolinomico_Codigo,
+              MTRD_GrupoPolinomico_Descripcion,
+              MTRD_GrupoPolinomico_Indice,
+              MTRD_GrupoPolinomico_Categoria
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `, [
+            projectId,
+            normalizeIdentifier(group.id, `poly-${groupIndex + 1}`),
+            Number.parseInt(group.orden || groupIndex + 1, 10) || (groupIndex + 1),
+            String(group.codigo || ""),
+            normalizeDescriptionText(group.descripcion),
+            normalizeDescriptionText(group.indice),
+            normalizeApuCategory(group.categoria),
+          ]);
+        }
+
+        const unitCatalogItems = normalizeIncomingUnitCatalogItems(project.unitCatalogItems);
+        for (let unitIndex = 0; unitIndex < unitCatalogItems.length; unitIndex += 1) {
+          const unit = unitCatalogItems[unitIndex];
+          await connection.query(`
+            INSERT INTO MTRD_UnidadCatalogo (
+              MTRD_UnidadCatalogo_KEY_Proyecto,
+              MTRD_UnidadCatalogo_UID,
+              MTRD_UnidadCatalogo_Orden,
+              MTRD_UnidadCatalogo_Codigo,
+              MTRD_UnidadCatalogo_Descripcion
+            ) VALUES (?, ?, ?, ?, ?)
+          `, [
+            projectId,
+            normalizeIdentifier(unit.id, `unit-${unitIndex + 1}`),
+            Number.parseInt(unit.orden || unitIndex + 1, 10) || (unitIndex + 1),
+            normalizeUnitCode(unit.codigo),
+            normalizeUnitDescription(unit.descripcion),
+          ]);
+        }
+        const resourceCatalogItems = normalizeIncomingResourceCatalogItems(project.resourceCatalogItems);
+        for (let resourceIndex = 0; resourceIndex < resourceCatalogItems.length; resourceIndex += 1) {
+          const resource = resourceCatalogItems[resourceIndex];
+          await connection.query(`
+            INSERT INTO MTRD_RecursoCatalogo (
+              MTRD_RecursoCatalogo_KEY_Proyecto,
+              MTRD_RecursoCatalogo_UID,
+              MTRD_RecursoCatalogo_Orden,
+              MTRD_RecursoCatalogo_Categoria,
+              MTRD_RecursoCatalogo_Descripcion,
+              MTRD_RecursoCatalogo_Unidad,
+              MTRD_RecursoCatalogo_PrecioUnitario,
+              MTRD_RecursoCatalogo_GrupoPolinomicoUID
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `, [
+            projectId,
+            normalizeIdentifier(resource.id, `resource-${resourceIndex + 1}`),
+            Number.parseInt(resource.orden || resourceIndex + 1, 10) || (resourceIndex + 1),
+            normalizeApuCategory(resource.category),
+            normalizeDescriptionText(resource.descripcion),
+            String(resource.unidad || ""),
+            parseDecimal(resource.precioUnitario),
+            normalizeIdentifier(resource.polynomialGroupId, "") || null,
+          ]);
+        }
         const itemIdByUid = new Map();
         const [existingItemRows] = await connection.query(`
           SELECT
@@ -1189,6 +2155,14 @@ class MySQLStorage {
           const metradoBim = existingItem
             ? parseDecimal(existingItem.item_metrado_bim)
             : parseDecimal(row.metradoBim);
+          const rowMetradoItems = normalizeIncomingMetradoItems(row.metradoItems);
+          const rowMetradoTradicional = rowMetradoItems.length > 0
+            ? getIncomingMetradoTotal(rowMetradoItems)
+            : parseDecimal(row.metradoTradicional ?? row.metrado);
+          const rowApuItems = normalizeIncomingApuItems(row.apuItems, row);
+          const rowCosto = rowApuItems.length > 0
+            ? getIncomingApuTotal(rowApuItems, row)
+            : parseDecimal(row.costo);
           incomingItemUids.add(rowUid);
 
           const itemValues = [
@@ -1197,11 +2171,13 @@ class MySQLStorage {
             String(row.codificacion || ""),
             normalizeDescriptionText(row.descripcion),
             String(row.unidad || ""),
-            parseDecimal(row.costo),
-            parseDecimal(row.metradoTradicional ?? row.metrado),
+            rowCosto,
+            rowMetradoTradicional,
             metradoBim,
             String(row.tipoMetrado || ""),
             normalizeReglaMetrado(row.tipoMetrado, row.reglaMetrado),
+            parseDecimal(row.rendimientoManoObra),
+            parseDecimal(row.rendimientoEquipos),
           ];
 
           if (existingItem?.item_id) {
@@ -1218,6 +2194,8 @@ class MySQLStorage {
                 MTRD_Item_MetradoBim = ?,
                 MTRD_Item_TipoMetrado = ?,
                 MTRD_Item_ReglaMetrado = ?,
+                MTRD_Item_RendimientoMO = ?,
+                MTRD_Item_RendimientoEQ = ?,
                 MTRD_Item_ActualizadoEn = CURRENT_TIMESTAMP
               WHERE MTRD_Item_ID = ?
             `, [...itemValues, existingItem.item_id]);
@@ -1236,8 +2214,10 @@ class MySQLStorage {
                 MTRD_Item_MetradoTradicional,
                 MTRD_Item_MetradoBim,
                 MTRD_Item_TipoMetrado,
-                MTRD_Item_ReglaMetrado
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                MTRD_Item_ReglaMetrado,
+                MTRD_Item_RendimientoMO,
+                MTRD_Item_RendimientoEQ
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `, [
               projectId,
               rowUid,
@@ -1256,6 +2236,77 @@ class MySQLStorage {
             WHERE MTRD_Item_KEY_Proyecto = ?
               AND MTRD_Item_UID IN (?)
           `, [projectId, removedItemUids]);
+        }
+
+        for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+          const row = rows[rowIndex];
+          const rowUid = normalizeIdentifier(row.id, `row-${projectIndex + 1}-${rowIndex + 1}`);
+          const itemId = itemIdByUid.get(rowUid);
+          if (!itemId) {
+            continue;
+          }
+          const metradoItems = normalizeIncomingMetradoItems(row.metradoItems);
+          for (let metradoIndex = 0; metradoIndex < metradoItems.length; metradoIndex += 1) {
+            const metradoItem = metradoItems[metradoIndex];
+            await connection.query(`
+              INSERT INTO MTRD_ItemMetrado (
+                MTRD_ItemMetrado_KEY_Proyecto,
+                MTRD_ItemMetrado_KEY_Item,
+                MTRD_ItemMetrado_UID,
+                MTRD_ItemMetrado_Orden,
+                MTRD_ItemMetrado_Descripcion,
+                MTRD_ItemMetrado_Veces,
+                MTRD_ItemMetrado_Largo,
+                MTRD_ItemMetrado_Ancho,
+                MTRD_ItemMetrado_Alto,
+                MTRD_ItemMetrado_Parcial
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [
+              projectId,
+              itemId,
+              normalizeIdentifier(metradoItem.id, `metrado-${rowIndex + 1}-${metradoIndex + 1}`),
+              metradoIndex + 1,
+              normalizeDescriptionText(metradoItem.descripcion),
+              parseDecimal(metradoItem.veces || 1),
+              parseDecimal(metradoItem.largo),
+              parseDecimal(metradoItem.ancho),
+              parseDecimal(metradoItem.alto),
+              parseDecimal(metradoItem.parcial),
+            ]);
+          }
+          const apuItems = normalizeIncomingApuItems(row.apuItems, row);
+          for (let apuIndex = 0; apuIndex < apuItems.length; apuIndex += 1) {
+            const apuItem = apuItems[apuIndex];
+            await connection.query(`
+              INSERT INTO MTRD_ItemApuInsumo (
+                MTRD_ItemApuInsumo_KEY_Proyecto,
+                MTRD_ItemApuInsumo_KEY_Item,
+                MTRD_ItemApuInsumo_UID,
+                MTRD_ItemApuInsumo_Orden,
+                MTRD_ItemApuInsumo_Categoria,
+                MTRD_ItemApuInsumo_RecursoUID,
+                MTRD_ItemApuInsumo_SubpartidaUID,
+                MTRD_ItemApuInsumo_Descripcion,
+                MTRD_ItemApuInsumo_Unidad,
+                MTRD_ItemApuInsumo_Cuadrilla,
+                MTRD_ItemApuInsumo_Cantidad,
+                MTRD_ItemApuInsumo_PrecioUnitario
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [
+              projectId,
+              itemId,
+              normalizeIdentifier(apuItem.id, `apu-${rowIndex + 1}-${apuIndex + 1}`),
+              apuIndex + 1,
+              normalizeApuCategory(apuItem.category),
+              normalizeIdentifier(apuItem.resourceId, "") || null,
+              normalizeIdentifier(apuItem.subpartidaId, "") || null,
+              normalizeDescriptionText(apuItem.descripcion),
+              String(apuItem.unidad || ""),
+              parseDecimal(apuItem.cuadrilla),
+              parseDecimal(apuItem.cantidad),
+              parseDecimal(apuItem.precioUnitario),
+            ]);
+          }
         }
 
         const collapsedIds = Array.isArray(project.collapsedIds) ? project.collapsedIds : [];
@@ -1380,8 +2431,10 @@ class MySQLStorage {
                 MTRD_SnapshotItem_MetradoTradicional,
                 MTRD_SnapshotItem_MetradoBim,
                 MTRD_SnapshotItem_TipoMetrado,
-                MTRD_SnapshotItem_ReglaMetrado
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                MTRD_SnapshotItem_ReglaMetrado,
+                MTRD_SnapshotItem_RendimientoMO,
+                MTRD_SnapshotItem_RendimientoEQ
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `, [
               snapshotId,
               normalizeIdentifier(row.id, `snapshot-row-${snapshotRowIndex + 1}`),
@@ -1395,6 +2448,8 @@ class MySQLStorage {
               parseDecimal(row.metradoBim),
               String(row.tipoMetrado || ""),
               normalizeReglaMetrado(row.tipoMetrado, row.reglaMetrado),
+              parseDecimal(row.rendimientoManoObra),
+              parseDecimal(row.rendimientoEquipos),
             ]);
           }
         }
@@ -1750,6 +2805,1445 @@ class MySQLStorage {
     }
   }
 
+  async createBimJob(input, context = {}) {
+    await this.ensureReady();
+    const project = await this.findProjectByUid(input.projectId);
+    if (!project) {
+      throw new Error(`No existe un proyecto activo con projectId ${input.projectId}.`);
+    }
+
+    const targetMode = normalizeBimJobTargetMode(input.targetMode);
+    const commandType = normalizeBimJobCommandType(input.commandType);
+    let payloadObject = normalizeJsonObject(input.payload) || {};
+    const modelIdentityObject = normalizeJsonObject(input.modelIdentity) || {};
+    payloadObject = await this.enrichBimJobPayloadForCommand(
+      project,
+      targetMode,
+      commandType,
+      payloadObject,
+      modelIdentityObject,
+    );
+    const cacheKey = buildBimJobCacheKey(project.project_uid, targetMode, commandType, modelIdentityObject, payloadObject);
+    const shouldReadCachedResult = Boolean(cacheKey && shouldReadBimJobCache(payloadObject, commandType));
+    const shouldReuseActiveJob = Boolean(cacheKey && shouldReuseActiveBimJob(payloadObject, commandType));
+    const shouldUseCreationLock = shouldReadCachedResult || shouldReuseActiveJob;
+
+    const createInput = {
+      project,
+      targetMode,
+      commandType,
+      payloadObject,
+      modelIdentityObject,
+      cacheKey,
+      shouldReadCachedResult,
+      shouldReuseActiveJob,
+    };
+
+    if (shouldUseCreationLock) {
+      return this.withBimJobCreationLock(cacheKey.hash, (connection) => (
+        this.createBimJobRecord(createInput, context, connection)
+      ));
+    }
+
+    return this.createBimJobRecord(createInput, context, this.pool);
+  }
+
+  async enrichBimJobPayloadForCommand(project, targetMode, commandType, payloadObject, modelIdentityObject) {
+    if (targetMode !== "active-revit" || commandType !== "active-revit-preview") {
+      return payloadObject;
+    }
+    if (Array.isArray(payloadObject.operations) && payloadObject.operations.length > 0) {
+      return payloadObject;
+    }
+
+    const [budgetRows, revitRows] = await Promise.all([
+      this.loadBudgetRowsForBimParameterWrites(project.project_id),
+      this.loadLatestRevitExportRowsForBimParameterWrites(
+        project.project_id,
+        modelIdentityObject.revitExportUid || modelIdentityObject.lastExportUid || modelIdentityObject.exportUid || "",
+      ),
+    ]);
+    const plan = createBimParameterWritePlan({
+      budgetRows,
+      revitRows,
+      batchSize: payloadObject.batchSize,
+    });
+
+    return {
+      ...payloadObject,
+      operationType: "parameter-write",
+      operationCount: plan.summary.operationCount,
+      operations: plan.operations,
+      operationSummary: plan.summary,
+      operationWarnings: plan.warnings,
+    };
+  }
+
+  async loadBudgetRowsForBimParameterWrites(projectId) {
+    const [rows] = await this.pool.query(`
+      SELECT
+        MTRD_Item_UID AS item_uid,
+        MTRD_Item_Nivel AS item_level,
+        MTRD_Item_Codificacion AS item_codificacion,
+        MTRD_Item_Descripcion AS item_descripcion,
+        MTRD_Item_Unidad AS item_unidad,
+        MTRD_Item_Costo AS item_costo
+      FROM MTRD_Item
+      WHERE MTRD_Item_KEY_Proyecto = ?
+      ORDER BY MTRD_Item_Orden ASC, MTRD_Item_ID ASC
+    `, [projectId]);
+
+    return addCodigoPartidaToRows(rows.map((row) => ({
+      itemUid: row.item_uid || "",
+      level: Number(row.item_level || 0),
+      codificacion: row.item_codificacion || "",
+      descripcion: normalizeDescriptionText(row.item_descripcion),
+      unidad: row.item_unidad || "",
+      costo: normalizeDecimalString(row.item_costo),
+    })));
+  }
+
+  async loadLatestRevitExportRowsForBimParameterWrites(projectId, requestedExportUid = "") {
+    const normalizedExportUid = normalizeIdentifier(requestedExportUid, "");
+    const exportParams = [projectId];
+    const exportUidFilter = normalizedExportUid ? "AND MTRD_RevitExport_UID = ?" : "";
+    if (normalizedExportUid) {
+      exportParams.push(normalizedExportUid);
+    }
+
+    const [exportRows] = await this.pool.query(`
+      SELECT
+        MTRD_RevitExport_ID AS export_id
+      FROM MTRD_RevitExport
+      WHERE MTRD_RevitExport_KEY_Proyecto = ?
+        ${exportUidFilter}
+      ORDER BY MTRD_RevitExport_FechaExportacion DESC, MTRD_RevitExport_ID DESC
+      LIMIT 1
+    `, exportParams);
+    const exportId = exportRows[0]?.export_id || null;
+    if (!exportId) {
+      return [];
+    }
+
+    const [rows] = await this.pool.query(`
+      SELECT
+        MTRD_RevitExportItem_ItemUID AS item_uid,
+        MTRD_RevitExportItem_ElementId AS element_id,
+        MTRD_RevitExportItem_ElementUniqueId AS element_unique_id,
+        MTRD_RevitExportItem_CodigoPartida AS codigo_partida,
+        MTRD_RevitExportItem_ParametrosJson AS parametros_json
+      FROM MTRD_RevitExportItem
+      WHERE MTRD_RevitExportItem_KEY_Export = ?
+      ORDER BY MTRD_RevitExportItem_ID ASC
+    `, [exportId]);
+
+    return rows.map((row) => ({
+      itemUid: row.item_uid || "",
+      elementId: row.element_id,
+      elementUniqueId: row.element_unique_id || "",
+      codigoPartida: row.codigo_partida || "",
+      parametrosJson: row.parametros_json || null,
+    }));
+  }
+
+  async createBimJobRecord(input, context = {}, executor = this.pool) {
+    const {
+      project,
+      targetMode,
+      commandType,
+      payloadObject,
+      modelIdentityObject,
+      cacheKey,
+      shouldReadCachedResult,
+      shouldReuseActiveJob,
+    } = input;
+    const jobUid = randomUUID();
+    const now = new Date().toISOString();
+    const cachedResult = cacheKey && shouldReadCachedResult && !shouldRefreshBimJobCache(payloadObject)
+      ? await this.loadBimJobCache(project.project_id, targetMode, commandType, cacheKey.hash, executor)
+      : null;
+    if (!cachedResult && shouldReuseActiveJob) {
+      await this.expireStaleBimJobs(BIM_JOB_STALE_MINUTES);
+      const activeJob = await this.loadActiveReusableBimJob(project.project_id, targetMode, commandType, cacheKey.hash, executor);
+      if (activeJob) {
+        await this.insertBimJobLogByUid(
+          activeJob.id,
+          "info",
+          `Solicitud duplicada reutilizo este job activo. Clave cache: ${cacheKey.fingerprint}.`,
+          executor,
+        );
+        return this.loadBimJob(activeJob.id);
+      }
+    }
+    const jobStatus = cachedResult ? "completed" : "queued";
+    const jobStage = cachedResult ? "Resultado cacheado" : "En cola";
+    const jobPercent = cachedResult ? 100 : 0;
+    const resultObject = cachedResult
+      ? {
+        ...cachedResult.result,
+        cache: {
+          hit: true,
+          sourceJobId: cachedResult.sourceJobUid,
+          key: cacheKey.fingerprint,
+        },
+      }
+      : null;
+    const operationStorage = detachBimJobOperationsForStorage(payloadObject, {
+      jobUid,
+      source: "payload",
+      pageSize: BIM_JOB_OPERATION_PAGE_SIZE,
+    });
+    const payloadJson = JSON.stringify(operationStorage.payloadObject);
+    const modelIdentityJson = JSON.stringify(modelIdentityObject);
+    const resultJson = resultObject ? JSON.stringify(resultObject) : null;
+    const [insert] = await executor.query(`
+      INSERT INTO MTRD_BimJob (
+        MTRD_BimJob_UID,
+        MTRD_BimJob_KEY_Proyecto,
+        MTRD_BimJob_TargetMode,
+        MTRD_BimJob_CommandType,
+        MTRD_BimJob_Status,
+        MTRD_BimJob_Stage,
+        MTRD_BimJob_Percent,
+        MTRD_BimJob_PayloadJson,
+        MTRD_BimJob_ModelIdentityJson,
+        MTRD_BimJob_ModelKeyHash,
+        MTRD_BimJob_ResultJson,
+        MTRD_BimJob_CompletedAt,
+        MTRD_BimJob_CreadoPor,
+        MTRD_BimJob_CreadoEn,
+        MTRD_BimJob_ActualizadoEn
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      jobUid,
+      project.project_id,
+      targetMode,
+      commandType,
+      jobStatus,
+      jobStage,
+      jobPercent,
+      payloadJson,
+      modelIdentityJson,
+      cacheKey ? cacheKey.hash : "",
+      resultJson,
+      cachedResult ? toMySqlDateTime(now) : null,
+      normalizeText(context.userName, "Usuario"),
+      toMySqlDateTime(now),
+      toMySqlDateTime(now),
+    ]);
+
+    if (cachedResult) {
+      await this.markBimJobCacheHit(cachedResult.cacheId, executor);
+      await this.insertBimJobLog(insert.insertId, "info", `Job BIM completado desde cache. Resultado original: ${cachedResult.sourceJobUid || "cache"}.`, executor);
+    } else {
+      if (operationStorage.operations.length > 0) {
+        await this.replaceBimJobOperations(insert.insertId, operationStorage.source, operationStorage.operations, executor);
+      }
+      const creationMessage = cacheKey
+        ? "Job BIM creado desde Itemicostos con cache habilitado."
+        : "Job BIM creado desde Itemicostos.";
+      await this.insertBimJobLog(insert.insertId, "info", creationMessage, executor);
+    }
+    return this.loadBimJob(jobUid);
+  }
+
+  async withBimJobCreationLock(modelKeyHash, work) {
+    const lockName = buildBimJobCreationLockName(modelKeyHash);
+    const connection = await this.pool.getConnection();
+    let acquired = false;
+    try {
+      const [rows] = await connection.query("SELECT GET_LOCK(?, ?) AS lock_result", [
+        lockName,
+        BIM_JOB_CREATE_LOCK_TIMEOUT_SECONDS,
+      ]);
+      acquired = Number(rows[0]?.lock_result || 0) === 1;
+      if (!acquired) {
+        throw new BimJobCreationLockError(lockName);
+      }
+      return await work(connection);
+    } finally {
+      if (acquired) {
+        try {
+          await connection.query("SELECT RELEASE_LOCK(?)", [lockName]);
+        } catch {
+          // La conexion se libera igualmente; MySQL suelta locks de sesion al cerrarla.
+        }
+      }
+      connection.release();
+    }
+  }
+
+  async retryBimJob(jobUid, context = {}) {
+    const originalJob = await this.loadBimJob(jobUid);
+    if (!originalJob) {
+      return null;
+    }
+    const retryDecision = createBimJobRetryDecision(originalJob.status, {
+      commandType: originalJob.commandType,
+    });
+    if (!retryDecision.canRetry) {
+      return null;
+    }
+    return this.createBimJob({
+      projectId: originalJob.projectId,
+      targetMode: originalJob.targetMode,
+      commandType: originalJob.commandType,
+      payload: {
+        ...originalJob.payload,
+        forceRefresh: true,
+        retryOf: originalJob.id,
+      },
+      modelIdentity: originalJob.modelIdentity,
+    }, context);
+  }
+
+  async createBimApplyJobFromPreview(jobUid, context = {}) {
+    return this.withBimApplyJobCreationLock(jobUid, async () => {
+      const previewJob = await this.loadBimJob(jobUid);
+      if (!previewJob || !canCreateBimApplyJob(previewJob)) {
+        return null;
+      }
+      const existingApplyJob = await this.loadBimApplyJobForPreview(previewJob);
+      if (existingApplyJob) {
+        await this.insertBimJobLogByUid(
+          existingApplyJob.id,
+          "info",
+          `Solicitud duplicada de aplicacion reutilizo el job ${existingApplyJob.id} del preview ${previewJob.id}.`,
+        );
+        return existingApplyJob;
+      }
+
+      const applyPlan = normalizeBimApplyPlan(previewJob.result?.applyPlan);
+      const storedApplyOperations = applyPlan.operations.length > 0
+        ? []
+        : await this.loadAllBimJobOperations(jobUid, "result-apply-plan");
+      const executableApplyPlan = storedApplyOperations.length > 0
+        ? { ...applyPlan, operations: storedApplyOperations }
+        : applyPlan;
+
+      return this.createBimJob({
+        projectId: previewJob.projectId,
+        targetMode: "active-revit",
+        commandType: "active-revit-apply",
+        payload: {
+          batchSize: resolveBimApplyJobBatchSize(previewJob.result?.applyPlan, previewJob.payload),
+          mode: "confirmed-apply",
+          source: "control-bim",
+          sourceJobId: previewJob.id,
+          sourceCommandType: previewJob.commandType,
+          approvedAt: new Date().toISOString(),
+          approvedBy: normalizeText(context.userName, "Usuario"),
+          cacheMode: "skip",
+          previewSummary: buildBimPreviewSummary(previewJob.result),
+          applyPlan: executableApplyPlan,
+        },
+        modelIdentity: previewJob.modelIdentity,
+      }, context);
+    });
+  }
+
+  async withBimApplyJobCreationLock(previewJobUid, work) {
+    const lockName = buildBimApplyJobCreationLockName(previewJobUid);
+    const connection = await this.pool.getConnection();
+    let acquired = false;
+    try {
+      const [rows] = await connection.query("SELECT GET_LOCK(?, ?) AS lock_result", [
+        lockName,
+        BIM_JOB_CREATE_LOCK_TIMEOUT_SECONDS,
+      ]);
+      acquired = Number(rows[0]?.lock_result || 0) === 1;
+      if (!acquired) {
+        throw new BimJobCreationLockError(lockName);
+      }
+      return await work(connection);
+    } finally {
+      if (acquired) {
+        try {
+          await connection.query("SELECT RELEASE_LOCK(?)", [lockName]);
+        } catch {
+          // La conexion se libera igualmente; MySQL suelta locks de sesion al cerrarla.
+        }
+      }
+      connection.release();
+    }
+  }
+
+  async loadBimApplyJobForPreview(previewJob) {
+    await this.ensureReady();
+    const previewJobId = normalizeIdentifier(previewJob?.id, "");
+    const projectId = normalizeIdentifier(previewJob?.projectId, "");
+    if (!previewJobId || !projectId) {
+      return null;
+    }
+    const [rows] = await this.pool.query(`
+      SELECT
+        j.MTRD_BimJob_UID AS job_uid
+      FROM MTRD_BimJob j
+      INNER JOIN MTRD_Proyecto p ON p.MTRD_Proyecto_ID = j.MTRD_BimJob_KEY_Proyecto
+      WHERE p.MTRD_Proyecto_UID = ?
+        AND j.MTRD_BimJob_TargetMode = 'active-revit'
+        AND j.MTRD_BimJob_CommandType = 'active-revit-apply'
+        AND JSON_UNQUOTE(JSON_EXTRACT(j.MTRD_BimJob_PayloadJson, '$.sourceJobId')) = ?
+      ORDER BY
+        FIELD(j.MTRD_BimJob_Status, 'applying', 'running', 'claimed', 'queued', 'completed', 'failed', 'cancelled') ASC,
+        j.MTRD_BimJob_CreadoEn ASC,
+        j.MTRD_BimJob_ID ASC
+      LIMIT 1
+    `, [projectId, previewJobId]);
+    const row = rows[0];
+    return row ? this.loadBimJob(row.job_uid) : null;
+  }
+
+  async listBimJobs(options = {}) {
+    await this.ensureReady();
+    await this.expireStaleBimJobs(BIM_JOB_STALE_MINUTES);
+    const limit = clampInteger(options.limit, 1, 100, 25);
+    const projectUid = normalizeIdentifier(options.projectId, "");
+    const params = [];
+    let projectFilter = "";
+    if (projectUid) {
+      projectFilter = "AND p.MTRD_Proyecto_UID = ?";
+      params.push(projectUid);
+    }
+    params.push(limit);
+
+    const [rows] = await this.pool.query(`
+      SELECT ${BIM_JOB_SELECT_COLUMNS}
+      FROM MTRD_BimJob j
+      INNER JOIN MTRD_Proyecto p ON p.MTRD_Proyecto_ID = j.MTRD_BimJob_KEY_Proyecto
+      WHERE p.MTRD_Proyecto_Estado = 1
+        ${projectFilter}
+      ORDER BY j.MTRD_BimJob_CreadoEn DESC, j.MTRD_BimJob_ID DESC
+      LIMIT ?
+    `, params);
+
+    return this.attachBimJobLogs(rows.map(mapBimJobRow));
+  }
+
+  async getBimJobQueueSummary(options = {}) {
+    await this.ensureReady();
+    await this.expireStaleBimJobs(BIM_JOB_STALE_MINUTES);
+    const projectUid = normalizeIdentifier(options.projectId, "");
+    if (!projectUid) {
+      return createEmptyBimJobQueueSummary();
+    }
+
+    const [rows] = await this.pool.query(`
+      SELECT
+        j.MTRD_BimJob_Status AS status_name,
+        j.MTRD_BimJob_TargetMode AS target_mode,
+        COUNT(*) AS job_count,
+        MIN(j.MTRD_BimJob_CreadoEn) AS oldest_created_at,
+        MAX(j.MTRD_BimJob_ActualizadoEn) AS latest_updated_at,
+        MAX(j.MTRD_BimJob_CompletedAt) AS latest_completed_at
+      FROM MTRD_BimJob j
+      INNER JOIN MTRD_Proyecto p ON p.MTRD_Proyecto_ID = j.MTRD_BimJob_KEY_Proyecto
+      WHERE p.MTRD_Proyecto_Estado = 1
+        AND p.MTRD_Proyecto_UID = ?
+      GROUP BY j.MTRD_BimJob_Status, j.MTRD_BimJob_TargetMode
+    `, [projectUid]);
+
+    const summary = mapBimJobQueueSummaryRows(rows);
+    summary.bridgePresence = await this.getBimBridgePresenceSummary({ projectId: projectUid });
+    return summary;
+  }
+
+  async saveBimBridgeHeartbeat(input = {}) {
+    await this.ensureReady();
+    const heartbeat = normalizeIncomingBimBridgeHeartbeat(input);
+    await this.pool.query(`
+      INSERT INTO MTRD_BimBridgeHeartbeat (
+        MTRD_BimBridgeHeartbeat_BridgeId,
+        MTRD_BimBridgeHeartbeat_ProjectUid,
+        MTRD_BimBridgeHeartbeat_RequestedBy,
+        MTRD_BimBridgeHeartbeat_ModelIdentityJson,
+        MTRD_BimBridgeHeartbeat_LastSeenAt,
+        MTRD_BimBridgeHeartbeat_CreadoEn
+      ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON DUPLICATE KEY UPDATE
+        MTRD_BimBridgeHeartbeat_ModelIdentityJson = VALUES(MTRD_BimBridgeHeartbeat_ModelIdentityJson),
+        MTRD_BimBridgeHeartbeat_LastSeenAt = CURRENT_TIMESTAMP
+    `, [
+      heartbeat.bridgeId,
+      heartbeat.projectId,
+      heartbeat.requestedBy,
+      JSON.stringify(heartbeat.activeModelIdentity || {}),
+    ]);
+    return this.getBimBridgePresenceSummary({ projectId: heartbeat.projectId });
+  }
+
+  async getBimBridgePresenceSummary(options = {}) {
+    await this.ensureReady();
+    const projectUid = normalizeIdentifier(options.projectId, "");
+    if (!projectUid) {
+      return summarizeBimBridgePresence([], { ttlSeconds: BIM_BRIDGE_PRESENCE_TTL_SECONDS });
+    }
+    const [rows] = await this.pool.query(`
+      SELECT
+        MTRD_BimBridgeHeartbeat_BridgeId AS bridge_id,
+        MTRD_BimBridgeHeartbeat_ProjectUid AS project_uid,
+        MTRD_BimBridgeHeartbeat_RequestedBy AS requested_by,
+        MTRD_BimBridgeHeartbeat_ModelIdentityJson AS model_identity_json,
+        MTRD_BimBridgeHeartbeat_LastSeenAt AS last_seen_at
+      FROM MTRD_BimBridgeHeartbeat
+      WHERE MTRD_BimBridgeHeartbeat_ProjectUid = ?
+      ORDER BY MTRD_BimBridgeHeartbeat_LastSeenAt DESC, MTRD_BimBridgeHeartbeat_ID DESC
+      LIMIT 20
+    `, [projectUid]);
+    return summarizeBimBridgePresence(rows.map(mapBimBridgeHeartbeatRow), {
+      ttlSeconds: BIM_BRIDGE_PRESENCE_TTL_SECONDS,
+    });
+  }
+
+  async loadBimJob(jobUid) {
+    await this.ensureReady();
+    const [rows] = await this.pool.query(`
+      SELECT ${BIM_JOB_SELECT_COLUMNS}
+      FROM MTRD_BimJob j
+      INNER JOIN MTRD_Proyecto p ON p.MTRD_Proyecto_ID = j.MTRD_BimJob_KEY_Proyecto
+      WHERE j.MTRD_BimJob_UID = ?
+      LIMIT 1
+    `, [normalizeIdentifier(jobUid, "")]);
+
+    const job = rows[0] ? mapBimJobRow(rows[0]) : null;
+    if (!job) {
+      return null;
+    }
+    const [withLogs] = await this.attachBimJobLogs([job]);
+    return withLogs || null;
+  }
+
+  async listBimJobOperations(jobUid, options = {}) {
+    await this.ensureReady();
+    const source = normalizeBimJobOperationSource(options.source, "payload");
+    const offset = clampInteger(options.offset, 0, Number.MAX_SAFE_INTEGER, 0);
+    const limit = clampInteger(options.limit, 1, 5000, BIM_JOB_OPERATION_PAGE_SIZE);
+    const normalizedJobUid = normalizeIdentifier(jobUid, "");
+    const [countRows] = await this.pool.query(`
+      SELECT COUNT(*) AS total
+      FROM MTRD_BimJobOperation o
+      INNER JOIN MTRD_BimJob j ON j.MTRD_BimJob_ID = o.MTRD_BimJobOperation_KEY_Job
+      WHERE j.MTRD_BimJob_UID = ?
+        AND o.MTRD_BimJobOperation_Source = ?
+    `, [normalizedJobUid, source]);
+    const total = Number(countRows[0]?.total || 0);
+    const [rows] = await this.pool.query(`
+      SELECT
+        o.MTRD_BimJobOperation_Orden AS operation_order,
+        o.MTRD_BimJobOperation_Tipo AS operation_type,
+        o.MTRD_BimJobOperation_ElementId AS element_id,
+        o.MTRD_BimJobOperation_ElementUniqueId AS element_unique_id,
+        o.MTRD_BimJobOperation_Parametro AS parameter_name,
+        o.MTRD_BimJobOperation_ValorTexto AS value_text,
+        o.MTRD_BimJobOperation_PayloadJson AS payload_json
+      FROM MTRD_BimJobOperation o
+      INNER JOIN MTRD_BimJob j ON j.MTRD_BimJob_ID = o.MTRD_BimJobOperation_KEY_Job
+      WHERE j.MTRD_BimJob_UID = ?
+        AND o.MTRD_BimJobOperation_Source = ?
+      ORDER BY o.MTRD_BimJobOperation_Orden ASC
+      LIMIT ? OFFSET ?
+    `, [normalizedJobUid, source, limit, offset]);
+
+    return {
+      jobId: normalizedJobUid,
+      source,
+      offset,
+      limit,
+      total,
+      hasMore: offset + rows.length < total,
+      nextOffset: offset + rows.length < total ? offset + rows.length : null,
+      operations: rows.map(mapBimJobOperationRow),
+    };
+  }
+
+  async loadAllBimJobOperations(jobUid, source = "payload") {
+    const operations = [];
+    let offset = 0;
+    while (true) {
+      const page = await this.listBimJobOperations(jobUid, {
+        source,
+        offset,
+        limit: 5000,
+      });
+      operations.push(...page.operations);
+      if (!page.hasMore || page.nextOffset === null) {
+        return operations;
+      }
+      offset = page.nextOffset;
+    }
+  }
+
+  async saveBimJobOperationsUpload(jobUid, uploadInput = {}) {
+    await this.ensureReady();
+    const normalizedJobUid = normalizeIdentifier(jobUid, "");
+    const source = normalizeBimJobOperationSource(uploadInput.source, "payload");
+    const mode = uploadInput.mode === "append" ? "append" : "replace";
+    const offset = mode === "append"
+      ? clampInteger(uploadInput.offset, 0, Number.MAX_SAFE_INTEGER, 0)
+      : 0;
+    const operations = normalizeBimJobOperationsForStorage(uploadInput.operations);
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.query(`
+        SELECT
+          MTRD_BimJob_ID AS job_id,
+          MTRD_BimJob_Status AS status_name
+        FROM MTRD_BimJob
+        WHERE MTRD_BimJob_UID = ?
+        LIMIT 1
+        FOR UPDATE
+      `, [normalizedJobUid]);
+      const row = rows[0];
+      if (!row) {
+        await connection.commit();
+        return {
+          jobId: normalizedJobUid,
+          source,
+          mode,
+          offset,
+          count: 0,
+          total: 0,
+        };
+      }
+      if (isFinishedBimJobStatus(row.status_name)) {
+        await connection.commit();
+        return null;
+      }
+
+      if (mode === "replace") {
+        await connection.query(`
+          DELETE FROM MTRD_BimJobOperation
+          WHERE MTRD_BimJobOperation_KEY_Job = ?
+            AND MTRD_BimJobOperation_Source = ?
+        `, [row.job_id, source]);
+      }
+      if (operations.length > 0) {
+        await this.insertBimJobOperations(row.job_id, source, operations, offset, connection);
+      }
+
+      const total = await this.countBimJobOperations(row.job_id, source, connection);
+      await connection.commit();
+      return {
+        jobId: normalizedJobUid,
+        source,
+        mode,
+        offset,
+        count: operations.length,
+        total,
+      };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async replaceBimJobOperations(jobId, sourceInput, operationsInput, executor = this.pool) {
+    const source = normalizeBimJobOperationSource(sourceInput, "payload");
+    const operations = normalizeBimJobOperationsForStorage(operationsInput);
+    await executor.query(`
+      DELETE FROM MTRD_BimJobOperation
+      WHERE MTRD_BimJobOperation_KEY_Job = ?
+        AND MTRD_BimJobOperation_Source = ?
+    `, [jobId, source]);
+    if (operations.length === 0) {
+      return;
+    }
+
+    await this.insertBimJobOperations(jobId, source, operations, 0, executor);
+  }
+
+  async countBimJobOperations(jobId, sourceInput, executor = this.pool) {
+    const source = normalizeBimJobOperationSource(sourceInput, "payload");
+    const [rows] = await executor.query(`
+      SELECT COUNT(*) AS total
+      FROM MTRD_BimJobOperation
+      WHERE MTRD_BimJobOperation_KEY_Job = ?
+        AND MTRD_BimJobOperation_Source = ?
+    `, [jobId, source]);
+    return Number(rows[0]?.total || 0);
+  }
+
+  async insertBimJobOperations(jobId, sourceInput, operationsInput, offsetInput = 0, executor = this.pool) {
+    const source = normalizeBimJobOperationSource(sourceInput, "payload");
+    const operations = normalizeBimJobOperationsForStorage(operationsInput);
+    const offset = clampInteger(offsetInput, 0, Number.MAX_SAFE_INTEGER, 0);
+    for (let index = 0; index < operations.length; index += 500) {
+      const chunk = operations.slice(index, index + 500);
+      await executor.query(`
+        INSERT INTO MTRD_BimJobOperation (
+          MTRD_BimJobOperation_KEY_Job,
+          MTRD_BimJobOperation_Source,
+          MTRD_BimJobOperation_Orden,
+          MTRD_BimJobOperation_Tipo,
+          MTRD_BimJobOperation_ElementId,
+          MTRD_BimJobOperation_ElementUniqueId,
+          MTRD_BimJobOperation_Parametro,
+          MTRD_BimJobOperation_ValorTexto,
+          MTRD_BimJobOperation_PayloadJson
+        ) VALUES ?
+        ON DUPLICATE KEY UPDATE
+          MTRD_BimJobOperation_Tipo = VALUES(MTRD_BimJobOperation_Tipo),
+          MTRD_BimJobOperation_ElementId = VALUES(MTRD_BimJobOperation_ElementId),
+          MTRD_BimJobOperation_ElementUniqueId = VALUES(MTRD_BimJobOperation_ElementUniqueId),
+          MTRD_BimJobOperation_Parametro = VALUES(MTRD_BimJobOperation_Parametro),
+          MTRD_BimJobOperation_ValorTexto = VALUES(MTRD_BimJobOperation_ValorTexto),
+          MTRD_BimJobOperation_PayloadJson = VALUES(MTRD_BimJobOperation_PayloadJson)
+      `, [chunk.map((operation, chunkIndex) => [
+        jobId,
+        source,
+        offset + index + chunkIndex,
+        operation.operationType,
+        operation.elementId > 0 ? operation.elementId : null,
+        operation.elementUniqueId,
+        operation.parameterName,
+        operation.value,
+        JSON.stringify(operation),
+      ])]);
+    }
+  }
+
+  async cancelBimJob(jobUid, context = {}) {
+    await this.ensureReady();
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.query(`
+        SELECT
+          MTRD_BimJob_ID AS job_id,
+          MTRD_BimJob_UID AS job_uid,
+          MTRD_BimJob_Status AS status_name,
+          MTRD_BimJob_ClaimedBy AS claimed_by
+        FROM MTRD_BimJob
+        WHERE MTRD_BimJob_UID = ?
+        LIMIT 1
+        FOR UPDATE
+      `, [normalizeIdentifier(jobUid, "")]);
+      const row = rows[0];
+      if (!row) {
+        await connection.rollback();
+        return null;
+      }
+      const cancelTransition = createBimJobCancelTransition(row.status_name, {
+        userName: context.userName,
+      });
+      if (cancelTransition.shouldUpdate) {
+        await connection.query(`
+          UPDATE MTRD_BimJob
+          SET
+            MTRD_BimJob_Status = ?,
+            MTRD_BimJob_Stage = ?,
+            MTRD_BimJob_Percent = ?,
+            MTRD_BimJob_CompletedAt = CURRENT_TIMESTAMP,
+            MTRD_BimJob_ActualizadoEn = CURRENT_TIMESTAMP
+          WHERE MTRD_BimJob_ID = ?
+        `, [
+          cancelTransition.status,
+          cancelTransition.stage,
+          cancelTransition.percent,
+          row.job_id,
+        ]);
+        if (cancelTransition.logMessage) {
+          await connection.query(`
+            INSERT INTO MTRD_BimJobLog (
+              MTRD_BimJobLog_KEY_Job,
+              MTRD_BimJobLog_Level,
+              MTRD_BimJobLog_Message
+            ) VALUES (?, ?, ?)
+          `, [
+            row.job_id,
+            cancelTransition.logLevel,
+            cancelTransition.logMessage,
+          ]);
+        }
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    return this.loadBimJob(jobUid);
+  }
+
+  async claimBimJobs(options = {}) {
+    await this.ensureReady();
+    await this.expireStaleBimJobs(BIM_JOB_STALE_MINUTES);
+    const limit = clampInteger(options.limit, 1, 10, 1);
+    const bridgeId = normalizeText(options.bridgeId, "revit-bridge");
+    const requestedBy = normalizeText(options.requestedBy, "");
+    const projectUid = normalizeIdentifier(options.projectId, "");
+    const targetMode = normalizeBimJobTargetMode(options.targetMode || "active-revit");
+    const commandType = normalizeOptionalBimJobCommandType(options.commandType);
+    const activeModelIdentity = normalizeJsonObject(options.activeModelIdentity) || {};
+    const allowedProjectIds = normalizeProjectIdsInput(options.allowedProjectIds, { allowWildcard: false });
+    const allowAllProjects = options.allowAllProjects === true;
+    const requireProjectScope = options.requireProjectScope === true;
+    const shouldFilterByActiveModel = targetMode === "active-revit";
+    const candidateLimit = shouldFilterByActiveModel ? 100 : limit;
+    const claimedJobUids = [];
+
+    if (requireProjectScope && !allowAllProjects && allowedProjectIds.length === 0) {
+      return [];
+    }
+
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const params = [targetMode];
+      let projectFilter = "";
+      if (projectUid) {
+        projectFilter = "AND p.MTRD_Proyecto_UID = ?";
+        params.push(projectUid);
+      }
+      let projectScopeFilter = "";
+      if (!allowAllProjects && allowedProjectIds.length > 0) {
+        projectScopeFilter = "AND p.MTRD_Proyecto_UID IN (?)";
+        params.push(allowedProjectIds);
+      }
+      let commandTypeFilter = "";
+      if (commandType) {
+        commandTypeFilter = "AND j.MTRD_BimJob_CommandType = ?";
+        params.push(commandType);
+      }
+      params.push(candidateLimit);
+
+      const [rows] = await connection.query(`
+        SELECT
+          j.MTRD_BimJob_ID AS job_id,
+          j.MTRD_BimJob_UID AS job_uid,
+          j.MTRD_BimJob_ModelIdentityJson AS model_identity_json
+        FROM MTRD_BimJob j
+        INNER JOIN MTRD_Proyecto p ON p.MTRD_Proyecto_ID = j.MTRD_BimJob_KEY_Proyecto
+        WHERE j.MTRD_BimJob_Status = 'queued'
+          AND j.MTRD_BimJob_TargetMode = ?
+          AND p.MTRD_Proyecto_Estado = 1
+          ${projectFilter}
+          ${projectScopeFilter}
+          ${commandTypeFilter}
+        ORDER BY j.MTRD_BimJob_CreadoEn ASC, j.MTRD_BimJob_ID ASC
+        LIMIT ?
+        FOR UPDATE
+      `, params);
+
+      const claimableRows = rows
+        .filter((row) => canClaimBimJobForActiveModel(row.model_identity_json, activeModelIdentity, targetMode))
+        .slice(0, limit);
+
+      for (const row of claimableRows) {
+        await connection.query(`
+          UPDATE MTRD_BimJob
+          SET
+            MTRD_BimJob_Status = 'claimed',
+            MTRD_BimJob_Stage = 'Tomado por Revit',
+            MTRD_BimJob_Percent = GREATEST(MTRD_BimJob_Percent, 1),
+            MTRD_BimJob_ClaimedBy = ?,
+            MTRD_BimJob_ClaimedAt = CURRENT_TIMESTAMP,
+            MTRD_BimJob_ActualizadoEn = CURRENT_TIMESTAMP
+          WHERE MTRD_BimJob_ID = ?
+        `, [bridgeId, row.job_id]);
+        await connection.query(`
+          INSERT INTO MTRD_BimJobLog (
+            MTRD_BimJobLog_KEY_Job,
+            MTRD_BimJobLog_Level,
+            MTRD_BimJobLog_Message
+          ) VALUES (?, 'info', ?)
+        `, [row.job_id, requestedBy ? `Job tomado por ${bridgeId}. Usuario Revit: ${requestedBy}.` : `Job tomado por ${bridgeId}.`]);
+        claimedJobUids.push(row.job_uid);
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    const jobs = [];
+    for (const jobUid of claimedJobUids) {
+      const job = await this.loadBimJob(jobUid);
+      if (job) {
+        jobs.push(job);
+      }
+    }
+    return jobs;
+  }
+
+  async updateBimJobProgress(jobUid, progress, context = {}) {
+    await this.ensureReady();
+    const connection = await this.pool.getConnection();
+    let shouldSaveCompletedCache = false;
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.query(`
+        SELECT
+          MTRD_BimJob_ID AS job_id,
+          MTRD_BimJob_UID AS job_uid,
+          MTRD_BimJob_Status AS status_name,
+          MTRD_BimJob_ClaimedBy AS claimed_by
+        FROM MTRD_BimJob
+        WHERE MTRD_BimJob_UID = ?
+        LIMIT 1
+        FOR UPDATE
+      `, [normalizeIdentifier(jobUid, "")]);
+      const row = rows[0];
+      if (!row) {
+        await connection.rollback();
+        return null;
+      }
+      const progressDecision = createBimJobProgressDecision(row.status_name);
+      if (!progressDecision.shouldUpdate) {
+        await connection.commit();
+        return this.loadBimJob(jobUid);
+      }
+      const reporterId = normalizeText(context.bridgeId, "");
+      if (!canReportBimJobProgressForClaim(row.claimed_by, reporterId)) {
+        await connection.rollback();
+        throw new BimJobOwnershipError(row.job_uid || jobUid, normalizeText(row.claimed_by, ""), reporterId);
+      }
+
+      const progressUpdate = normalizeIncomingBimJobProgress(progress, {
+        currentStatus: progressDecision.currentStatus || "running",
+      });
+      const status = normalizeBimJobStatus(progressUpdate.status, row.status_name || "running");
+      const percent = clampNumber(progressUpdate.percent, 0, 100, status === "completed" ? 100 : 0);
+      const stage = normalizeText(progressUpdate.stage, getDefaultBimJobStage(status));
+      const resultStorage = progressUpdate.result === null
+        ? { payloadObject: null, operations: [], source: "result-apply-plan" }
+        : detachBimJobOperationsForStorage(normalizeJsonObject(progressUpdate.result) || {}, {
+          jobUid,
+          source: "result-apply-plan",
+          applyPlanOnly: true,
+          pageSize: BIM_JOB_OPERATION_PAGE_SIZE,
+        });
+      const resultJson = resultStorage.payloadObject === null ? null : JSON.stringify(resultStorage.payloadObject);
+      shouldSaveCompletedCache = status === "completed" && Boolean(resultJson);
+      const errorMessage = normalizeText(progressUpdate.error, "");
+      const completedAtSql = isFinishedBimJobStatus(status) ? "CURRENT_TIMESTAMP" : "NULL";
+      await connection.query(`
+        UPDATE MTRD_BimJob
+        SET
+          MTRD_BimJob_Status = ?,
+          MTRD_BimJob_Stage = ?,
+          MTRD_BimJob_Percent = ?,
+          MTRD_BimJob_ResultJson = COALESCE(?, MTRD_BimJob_ResultJson),
+          MTRD_BimJob_Error = ?,
+          MTRD_BimJob_ClaimedBy = COALESCE(NULLIF(?, ''), MTRD_BimJob_ClaimedBy),
+          MTRD_BimJob_CompletedAt = ${completedAtSql},
+          MTRD_BimJob_ActualizadoEn = CURRENT_TIMESTAMP
+        WHERE MTRD_BimJob_ID = ?
+      `, [
+        status,
+        stage,
+        percent,
+        resultJson,
+        errorMessage,
+        reporterId,
+        row.job_id,
+      ]);
+      if (resultStorage.operations.length > 0) {
+        await this.replaceBimJobOperations(row.job_id, resultStorage.source, resultStorage.operations, connection);
+      }
+
+      const logMessage = normalizeText(progressUpdate.message, "");
+      if (logMessage) {
+        await connection.query(`
+          INSERT INTO MTRD_BimJobLog (
+            MTRD_BimJobLog_KEY_Job,
+            MTRD_BimJobLog_Level,
+            MTRD_BimJobLog_Message
+          ) VALUES (?, ?, ?)
+        `, [
+          row.job_id,
+          normalizeBimJobLogLevel(progressUpdate.level),
+          logMessage,
+        ]);
+      }
+
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    if (shouldSaveCompletedCache) {
+      await this.saveCompletedBimJobCache(jobUid);
+    }
+    return this.loadBimJob(jobUid);
+  }
+
+  async expireStaleBimJobs(staleMinutes = BIM_JOB_STALE_MINUTES) {
+    await this.ensureReady();
+    const minutes = normalizeBimJobStaleMinutes(staleMinutes, BIM_JOB_STALE_MINUTES);
+    const sweepNow = Date.now();
+    const sweepPlan = createBimJobStaleExpirationPlan([], {
+      now: sweepNow,
+      staleMinutes: minutes,
+    });
+    const cutoff = toMySqlDateTime(sweepPlan.cutoffIso);
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.query(`
+        SELECT
+          MTRD_BimJob_ID AS job_id,
+          MTRD_BimJob_UID AS job_uid,
+          MTRD_BimJob_Status AS status_name,
+          MTRD_BimJob_ClaimedBy AS claimed_by,
+          MTRD_BimJob_ActualizadoEn AS updated_at
+        FROM MTRD_BimJob
+        WHERE MTRD_BimJob_Status IN ('claimed', 'running', 'applying')
+          AND MTRD_BimJob_ActualizadoEn < ?
+        ORDER BY MTRD_BimJob_ActualizadoEn ASC, MTRD_BimJob_ID ASC
+        LIMIT 100
+        FOR UPDATE
+      `, [cutoff]);
+      const plan = createBimJobStaleExpirationPlan(rows, {
+        now: sweepNow,
+        staleMinutes: minutes,
+      });
+      if (plan.expiredCount === 0) {
+        await connection.commit();
+        return 0;
+      }
+
+      await connection.query(`
+        UPDATE MTRD_BimJob
+        SET
+          MTRD_BimJob_Status = 'failed',
+          MTRD_BimJob_Stage = 'Sin heartbeat',
+          MTRD_BimJob_Percent = 100,
+          MTRD_BimJob_Error = ?,
+          MTRD_BimJob_CompletedAt = CURRENT_TIMESTAMP,
+          MTRD_BimJob_ActualizadoEn = CURRENT_TIMESTAMP
+        WHERE MTRD_BimJob_ID IN (?)
+      `, [
+        plan.errorMessage,
+        plan.expiredJobIds,
+      ]);
+
+      for (const expiredJob of plan.expiredJobs) {
+        await connection.query(`
+          INSERT INTO MTRD_BimJobLog (
+            MTRD_BimJobLog_KEY_Job,
+            MTRD_BimJobLog_Level,
+            MTRD_BimJobLog_Message
+          ) VALUES (?, 'error', ?)
+        `, [
+          expiredJob.jobId,
+          expiredJob.logMessage,
+        ]);
+      }
+      await connection.commit();
+      return plan.expiredCount;
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async loadBimJobCache(projectId, targetMode, commandType, modelKeyHash, executor = this.pool) {
+    if (!modelKeyHash) {
+      return null;
+    }
+    const [rows] = await executor.query(`
+      SELECT
+        MTRD_BimJobCache_ID AS cache_id,
+        MTRD_BimJobCache_ResultJson AS result_json,
+        MTRD_BimJobCache_SourceJobUID AS source_job_uid,
+        MTRD_BimJobCache_HitCount AS hit_count
+      FROM MTRD_BimJobCache
+      WHERE MTRD_BimJobCache_KEY_Proyecto = ?
+        AND MTRD_BimJobCache_TargetMode = ?
+        AND MTRD_BimJobCache_CommandType = ?
+        AND MTRD_BimJobCache_ModelKeyHash = ?
+      LIMIT 1
+    `, [
+      projectId,
+      normalizeBimJobTargetMode(targetMode),
+      normalizeBimJobCommandType(commandType),
+      modelKeyHash,
+    ]);
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      cacheId: row.cache_id,
+      result: parseJsonObject(row.result_json) || {},
+      sourceJobUid: normalizeIdentifier(row.source_job_uid, ""),
+      hitCount: Number(row.hit_count || 0),
+    };
+  }
+
+  async loadActiveReusableBimJob(projectId, targetMode, commandType, modelKeyHash, executor = this.pool) {
+    if (!modelKeyHash) {
+      return null;
+    }
+    const [rows] = await executor.query(`
+      SELECT ${BIM_JOB_SELECT_COLUMNS}
+      FROM MTRD_BimJob j
+      INNER JOIN MTRD_Proyecto p ON p.MTRD_Proyecto_ID = j.MTRD_BimJob_KEY_Proyecto
+      WHERE j.MTRD_BimJob_KEY_Proyecto = ?
+        AND j.MTRD_BimJob_TargetMode = ?
+        AND j.MTRD_BimJob_CommandType = ?
+        AND j.MTRD_BimJob_ModelKeyHash = ?
+        AND j.MTRD_BimJob_Status IN (?)
+      ORDER BY
+        FIELD(j.MTRD_BimJob_Status, 'applying', 'running', 'claimed', 'queued') ASC,
+        j.MTRD_BimJob_ActualizadoEn DESC,
+        j.MTRD_BimJob_CreadoEn ASC,
+        j.MTRD_BimJob_ID ASC
+      LIMIT 1
+    `, [
+      projectId,
+      normalizeBimJobTargetMode(targetMode),
+      normalizeBimJobCommandType(commandType),
+      modelKeyHash,
+      BIM_JOB_ACTIVE_REUSE_STATUSES,
+    ]);
+    const jobs = await this.attachBimJobLogs(rows.map(mapBimJobRow));
+    return jobs[0] || null;
+  }
+
+  async markBimJobCacheHit(cacheId, executor = this.pool) {
+    if (!cacheId) {
+      return;
+    }
+    await executor.query(`
+      UPDATE MTRD_BimJobCache
+      SET
+        MTRD_BimJobCache_HitCount = MTRD_BimJobCache_HitCount + 1,
+        MTRD_BimJobCache_ActualizadoEn = CURRENT_TIMESTAMP
+      WHERE MTRD_BimJobCache_ID = ?
+    `, [cacheId]);
+  }
+
+  async saveCompletedBimJobCache(jobUid) {
+    const [rows] = await this.pool.query(`
+      SELECT
+        j.MTRD_BimJob_UID AS job_uid,
+        p.MTRD_Proyecto_ID AS project_id,
+        p.MTRD_Proyecto_UID AS project_uid,
+        j.MTRD_BimJob_TargetMode AS target_mode,
+        j.MTRD_BimJob_CommandType AS command_type,
+        j.MTRD_BimJob_PayloadJson AS payload_json,
+        j.MTRD_BimJob_ModelIdentityJson AS model_identity_json,
+        j.MTRD_BimJob_ResultJson AS result_json
+      FROM MTRD_BimJob j
+      INNER JOIN MTRD_Proyecto p ON p.MTRD_Proyecto_ID = j.MTRD_BimJob_KEY_Proyecto
+      WHERE j.MTRD_BimJob_UID = ?
+        AND j.MTRD_BimJob_Status = 'completed'
+        AND j.MTRD_BimJob_ResultJson IS NOT NULL
+      LIMIT 1
+    `, [normalizeIdentifier(jobUid, "")]);
+    const row = rows[0];
+    if (!row) {
+      return false;
+    }
+
+    const targetMode = normalizeBimJobTargetMode(row.target_mode);
+    const commandType = normalizeBimJobCommandType(row.command_type);
+    const payload = parseJsonObject(row.payload_json) || {};
+    const modelIdentity = parseJsonObject(row.model_identity_json) || {};
+    const result = parseJsonObject(row.result_json) || {};
+    if (result.cache && typeof result.cache === "object" && result.cache.hit === true) {
+      return false;
+    }
+    if (!shouldPersistBimJobCache(payload, commandType)) {
+      return false;
+    }
+
+    const cacheKey = buildBimJobCacheKey(row.project_uid, targetMode, commandType, modelIdentity, payload);
+    if (!cacheKey) {
+      return false;
+    }
+
+    await this.pool.query(`
+      INSERT INTO MTRD_BimJobCache (
+        MTRD_BimJobCache_KEY_Proyecto,
+        MTRD_BimJobCache_TargetMode,
+        MTRD_BimJobCache_CommandType,
+        MTRD_BimJobCache_ModelKeyHash,
+        MTRD_BimJobCache_ModelIdentityJson,
+        MTRD_BimJobCache_ResultJson,
+        MTRD_BimJobCache_SourceJobUID,
+        MTRD_BimJobCache_CreadoEn,
+        MTRD_BimJobCache_ActualizadoEn
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON DUPLICATE KEY UPDATE
+        MTRD_BimJobCache_ModelIdentityJson = VALUES(MTRD_BimJobCache_ModelIdentityJson),
+        MTRD_BimJobCache_ResultJson = VALUES(MTRD_BimJobCache_ResultJson),
+        MTRD_BimJobCache_SourceJobUID = VALUES(MTRD_BimJobCache_SourceJobUID),
+        MTRD_BimJobCache_ActualizadoEn = CURRENT_TIMESTAMP
+    `, [
+      row.project_id,
+      targetMode,
+      commandType,
+      cacheKey.hash,
+      JSON.stringify(modelIdentity),
+      JSON.stringify(result),
+      normalizeIdentifier(row.job_uid, ""),
+    ]);
+    return true;
+  }
+
+  async findProjectByUid(projectUid) {
+    await this.ensureReady();
+    const [rows] = await this.pool.query(`
+      SELECT
+        MTRD_Proyecto_ID AS project_id,
+        MTRD_Proyecto_UID AS project_uid
+      FROM MTRD_Proyecto
+      WHERE MTRD_Proyecto_UID = ?
+        AND MTRD_Proyecto_Estado = 1
+      LIMIT 1
+    `, [normalizeIdentifier(projectUid, "")]);
+    return rows[0] || null;
+  }
+
+  async insertBimJobLog(jobId, level, message, executor = this.pool) {
+    await executor.query(`
+      INSERT INTO MTRD_BimJobLog (
+        MTRD_BimJobLog_KEY_Job,
+        MTRD_BimJobLog_Level,
+        MTRD_BimJobLog_Message
+      ) VALUES (?, ?, ?)
+    `, [
+      jobId,
+      normalizeBimJobLogLevel(level),
+      normalizeText(message, ""),
+    ]);
+  }
+
+  async insertBimJobLogByUid(jobUid, level, message, executor = this.pool) {
+    await executor.query(`
+      INSERT INTO MTRD_BimJobLog (
+        MTRD_BimJobLog_KEY_Job,
+        MTRD_BimJobLog_Level,
+        MTRD_BimJobLog_Message
+      )
+      SELECT
+        MTRD_BimJob_ID,
+        ?,
+        ?
+      FROM MTRD_BimJob
+      WHERE MTRD_BimJob_UID = ?
+      LIMIT 1
+    `, [
+      normalizeBimJobLogLevel(level),
+      normalizeText(message, ""),
+      normalizeIdentifier(jobUid, ""),
+    ]);
+  }
+
+  async attachBimJobLogs(jobs) {
+    if (jobs.length === 0) {
+      return [];
+    }
+    const jobIds = jobs.map((job) => job.internalId).filter(Boolean);
+    if (jobIds.length === 0) {
+      return jobs.map(({ internalId, ...job }) => ({ ...job, logs: [] }));
+    }
+    const [logRows] = await this.pool.query(`
+      SELECT
+        MTRD_BimJobLog_ID AS log_id,
+        MTRD_BimJobLog_KEY_Job AS job_id,
+        MTRD_BimJobLog_Level AS level_name,
+        MTRD_BimJobLog_Message AS message_text,
+        MTRD_BimJobLog_CreadoEn AS created_at
+      FROM MTRD_BimJobLog
+      WHERE MTRD_BimJobLog_KEY_Job IN (?)
+      ORDER BY MTRD_BimJobLog_CreadoEn ASC, MTRD_BimJobLog_ID ASC
+    `, [jobIds]);
+    const logsByJobId = groupRowsByKey(logRows, "job_id");
+    return jobs.map(({ internalId, ...job }) => ({
+      ...job,
+      logs: (logsByJobId.get(internalId) || []).map((row) => ({
+        id: String(row.log_id || ""),
+        level: normalizeBimJobLogLevel(row.level_name),
+        message: normalizeText(row.message_text, ""),
+        createdAt: normalizeIsoString(row.created_at),
+      })),
+    }));
+  }
+
+  async listBimJobArtifacts(jobUid) {
+    await this.ensureReady();
+    const [rows] = await this.pool.query(`
+      SELECT
+        a.MTRD_BimJobArtifact_UID AS artifact_uid,
+        a.MTRD_BimJobArtifact_Kind AS artifact_kind,
+        a.MTRD_BimJobArtifact_Name AS artifact_name,
+        a.MTRD_BimJobArtifact_ContentType AS content_type,
+        a.MTRD_BimJobArtifact_StorageProvider AS storage_provider,
+        a.MTRD_BimJobArtifact_StorageUri AS storage_uri,
+        a.MTRD_BimJobArtifact_SizeBytes AS size_bytes,
+        a.MTRD_BimJobArtifact_ChecksumSha256 AS checksum_sha256,
+        a.MTRD_BimJobArtifact_MetadataJson AS metadata_json,
+        a.MTRD_BimJobArtifact_CreadoEn AS created_at
+      FROM MTRD_BimJobArtifact a
+      INNER JOIN MTRD_BimJob j ON j.MTRD_BimJob_ID = a.MTRD_BimJobArtifact_KEY_Job
+      WHERE j.MTRD_BimJob_UID = ?
+      ORDER BY a.MTRD_BimJobArtifact_CreadoEn ASC, a.MTRD_BimJobArtifact_ID ASC
+    `, [normalizeIdentifier(jobUid, "")]);
+
+    return rows.map(mapBimJobArtifactRow);
+  }
+
+  async loadBimJobArtifact(jobUid, artifactUid) {
+    await this.ensureReady();
+    const [rows] = await this.pool.query(`
+      SELECT
+        a.MTRD_BimJobArtifact_UID AS artifact_uid,
+        a.MTRD_BimJobArtifact_Kind AS artifact_kind,
+        a.MTRD_BimJobArtifact_Name AS artifact_name,
+        a.MTRD_BimJobArtifact_ContentType AS content_type,
+        a.MTRD_BimJobArtifact_StorageProvider AS storage_provider,
+        a.MTRD_BimJobArtifact_StorageUri AS storage_uri,
+        a.MTRD_BimJobArtifact_SizeBytes AS size_bytes,
+        a.MTRD_BimJobArtifact_ChecksumSha256 AS checksum_sha256,
+        a.MTRD_BimJobArtifact_MetadataJson AS metadata_json,
+        a.MTRD_BimJobArtifact_CreadoEn AS created_at
+      FROM MTRD_BimJobArtifact a
+      INNER JOIN MTRD_BimJob j ON j.MTRD_BimJob_ID = a.MTRD_BimJobArtifact_KEY_Job
+      WHERE j.MTRD_BimJob_UID = ?
+        AND a.MTRD_BimJobArtifact_UID = ?
+      LIMIT 1
+    `, [
+      normalizeIdentifier(jobUid, ""),
+      normalizeIdentifier(artifactUid, ""),
+    ]);
+    return rows[0] ? mapBimJobArtifactRow(rows[0]) : null;
+  }
+
+  async saveBimJobArtifacts(jobUid, artifactsInput, context = {}) {
+    await this.ensureReady();
+    const artifacts = normalizeIncomingBimArtifacts(artifactsInput);
+    if (artifacts.length === 0) {
+      return [];
+    }
+
+    const connection = await this.pool.getConnection();
+    const savedUids = [];
+    try {
+      await connection.beginTransaction();
+      const [jobRows] = await connection.query(`
+        SELECT
+          MTRD_BimJob_ID AS job_id,
+          MTRD_BimJob_UID AS job_uid,
+          MTRD_BimJob_ClaimedBy AS claimed_by,
+          MTRD_BimJob_Status AS status_name
+        FROM MTRD_BimJob
+        WHERE MTRD_BimJob_UID = ?
+        LIMIT 1
+        FOR UPDATE
+      `, [normalizeIdentifier(jobUid, "")]);
+      const jobId = jobRows[0]?.job_id;
+      if (!jobId) {
+        await connection.rollback();
+        return [];
+      }
+      if (isFinishedBimJobStatus(jobRows[0]?.status_name)) {
+        await connection.rollback();
+        return null;
+      }
+      const reporterId = normalizeText(context.bridgeId, "");
+      if (!canWriteBimJobArtifactsForClaim(jobRows[0]?.claimed_by, reporterId)) {
+        await connection.rollback();
+        throw new BimJobOwnershipError(
+          jobRows[0]?.job_uid || jobUid,
+          normalizeText(jobRows[0]?.claimed_by, ""),
+          reporterId,
+        );
+      }
+
+      for (const artifact of artifacts) {
+        const artifactUid = randomUUID();
+        let storageProvider = artifact.storageProvider;
+        let storageUri = artifact.storageUri;
+        let sizeBytes = artifact.sizeBytes;
+        let checksum = artifact.checksumSha256;
+
+        if (hasBimArtifactContent(artifact)) {
+          const artifactDir = path.join(BIM_ARTIFACT_STORAGE_DIR, sanitizePathSegment(jobUid));
+          await fs.promises.mkdir(artifactDir, { recursive: true });
+          const buffer = decodeBimArtifactContent(artifact);
+          if (buffer.length > BIM_ARTIFACT_MAX_BYTES) {
+            throw new Error(`El artefacto ${artifact.name} supera el maximo de ${BIM_ARTIFACT_MAX_BYTES} bytes.`);
+          }
+          checksum = createHash("sha256").update(buffer).digest("hex");
+          const safeFileName = `${artifactUid}-${sanitizePathSegment(artifact.name) || "artifact.bin"}`;
+          const absolutePath = path.join(artifactDir, safeFileName);
+          await fs.promises.writeFile(absolutePath, buffer);
+          storageProvider = "local";
+          storageUri = `local://${path.relative(__dirname, absolutePath).replace(/\\/g, "/")}`;
+          sizeBytes = buffer.length;
+        } else if (!hasBimArtifactReference(artifact)) {
+          continue;
+        }
+
+        const metadata = {
+          ...artifact.metadata,
+          uploadedBy: normalizeText(context.bridgeId, "bim-worker"),
+        };
+
+        await connection.query(`
+          INSERT INTO MTRD_BimJobArtifact (
+            MTRD_BimJobArtifact_UID,
+            MTRD_BimJobArtifact_KEY_Job,
+            MTRD_BimJobArtifact_Kind,
+            MTRD_BimJobArtifact_Name,
+            MTRD_BimJobArtifact_ContentType,
+            MTRD_BimJobArtifact_StorageProvider,
+            MTRD_BimJobArtifact_StorageUri,
+            MTRD_BimJobArtifact_SizeBytes,
+            MTRD_BimJobArtifact_ChecksumSha256,
+            MTRD_BimJobArtifact_MetadataJson
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          artifactUid,
+          jobId,
+          artifact.kind,
+          artifact.name,
+          artifact.contentType,
+          storageProvider,
+          storageUri,
+          sizeBytes,
+          checksum,
+          JSON.stringify(metadata),
+        ]);
+        await connection.query(`
+          INSERT INTO MTRD_BimJobLog (
+            MTRD_BimJobLog_KEY_Job,
+            MTRD_BimJobLog_Level,
+            MTRD_BimJobLog_Message
+          ) VALUES (?, 'info', ?)
+        `, [
+          jobId,
+          `Artefacto BIM guardado: ${artifact.name}.`,
+        ]);
+        savedUids.push(artifactUid);
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    const allArtifacts = await this.listBimJobArtifacts(jobUid);
+    return allArtifacts.filter((artifact) => savedUids.includes(artifact.id));
+  }
+
   async ensureReady() {
     if (!this.readyPromise) {
       this.readyPromise = this.initialize().catch((error) => {
@@ -1813,6 +4307,184 @@ async function ensureAuthorizedRequest(accessControlManager, request, response, 
   }
 
   return authorization;
+}
+
+async function authorizeBimBridgeRequest(request, response) {
+  if (isAuthorizedRevitIngestRequest(request)) {
+    return { apiKey: true, user: null };
+  }
+
+  const authorization = await accessControl.authorizeRequest(request, "editor");
+  if (!authorization.ok) {
+    respondJson(response, authorization.status, {
+      ok: false,
+      error: revitIngestApiKey
+        ? "Bridge BIM no autorizado. Configura web.ingestApiKey con REVIT_INGEST_API_KEY."
+        : authorization.error,
+      accessControl: accessControl.getPublicSettings(),
+    });
+    return null;
+  }
+
+  return { apiKey: false, user: authorization.user };
+}
+
+async function authorizeBimBridgeClaimAccess({ bridgeAuth, targetMode, requestedBy, projectId }) {
+  const requestedUser = bridgeAuth?.apiKey && targetMode === "active-revit" && requestedBy
+    ? await accessControl.findUserByEmail(requestedBy)
+    : null;
+
+  return createBimBridgeClaimAccessDecision({
+    accessControlEnabled: accessControl.getPublicSettings().enabled,
+    apiKey: bridgeAuth?.apiKey === true,
+    sessionUser: bridgeAuth?.user || null,
+    requestedBy,
+    requestedUser,
+    targetMode,
+    projectId,
+  });
+}
+
+async function streamBimJobEvents(request, response, storageAdapter, jobUid) {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  let closed = false;
+  request.on("close", () => {
+    closed = true;
+  });
+
+  const writeEvent = (event, payload) => {
+    if (closed) return;
+    response.write(`event: ${event}\n`);
+    response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  response.write(`retry: ${BIM_JOB_SSE_RETRY_MS}\n\n`);
+
+  let lastSignature = "";
+  const emitCurrent = async () => {
+    const job = await storageAdapter.loadBimJob(jobUid);
+    if (!job) {
+      writeEvent("error", { ok: false, error: "No se encontro el job BIM." });
+      closed = true;
+      response.end();
+      return;
+    }
+    const eventPlan = shouldEmitBimJobSseUpdate(job, lastSignature);
+    if (eventPlan.shouldEmit) {
+      lastSignature = eventPlan.signature;
+      writeEvent("job", { ok: true, job });
+    } else {
+      writeEvent("ping", { ok: true, updatedAt: new Date().toISOString() });
+    }
+    if (isFinishedBimJobStatus(job.status)) {
+      closed = true;
+      response.end();
+    }
+  };
+
+  await emitCurrent();
+  if (closed) {
+    return;
+  }
+  const interval = setInterval(() => {
+    if (closed) {
+      clearInterval(interval);
+      return;
+    }
+    emitCurrent().catch((error) => {
+      writeEvent("error", { ok: false, error: error instanceof Error ? error.message : String(error) });
+      clearInterval(interval);
+      response.end();
+    });
+  }, BIM_JOB_SSE_POLL_MS);
+}
+
+async function streamBimArtifactDownload(request, response, artifact) {
+  const localPath = resolveLocalBimArtifactPath(artifact);
+  if (!localPath) {
+    const remoteUrl = resolveRemoteBimArtifactDownloadUrl(artifact);
+    if (remoteUrl) {
+      response.writeHead(302, {
+        "Location": remoteUrl,
+        "Cache-Control": "private, no-cache",
+        "X-Itemicostos-Artifact-Id": artifact.id,
+        "X-Itemicostos-Artifact-Sha256": artifact.checksumSha256 || "",
+      });
+      response.end();
+      return;
+    }
+    respondJson(response, 409, {
+      ok: false,
+      error: "El proveedor de almacenamiento del artefacto aun no tiene descarga directa configurada.",
+    });
+    return;
+  }
+
+  let stat;
+  try {
+    stat = await fs.promises.stat(localPath);
+  } catch {
+    respondJson(response, 404, { ok: false, error: "No se encontro el archivo fisico del artefacto BIM." });
+    return;
+  }
+  if (!stat.isFile()) {
+    respondJson(response, 404, { ok: false, error: "El artefacto BIM no apunta a un archivo valido." });
+    return;
+  }
+
+  response.writeHead(200, {
+    "Content-Type": artifact.contentType || "application/octet-stream",
+    "Content-Length": String(stat.size),
+    "Content-Disposition": `attachment; filename="${escapeContentDispositionFilename(artifact.name || "artifact.bin")}"`,
+    "Cache-Control": "private, no-cache",
+    "X-Itemicostos-Artifact-Id": artifact.id,
+    "X-Itemicostos-Artifact-Sha256": artifact.checksumSha256 || "",
+  });
+  if (request.method === "HEAD") {
+    response.end();
+    return;
+  }
+  fs.createReadStream(localPath).pipe(response);
+}
+
+function resolveLocalBimArtifactPath(artifact) {
+  if (artifact.storageProvider !== "local" || !artifact.storageUri.startsWith("local://")) {
+    return "";
+  }
+  const relativePath = artifact.storageUri.slice("local://".length);
+  const absolutePath = path.resolve(__dirname, relativePath);
+  const storageRoot = path.resolve(BIM_ARTIFACT_STORAGE_DIR);
+  const normalizedAbsolutePath = absolutePath.toLowerCase();
+  const normalizedStorageRoot = storageRoot.toLowerCase();
+  if (
+    !normalizedAbsolutePath.startsWith(`${normalizedStorageRoot}${path.sep}`)
+    && normalizedAbsolutePath !== normalizedStorageRoot
+  ) {
+    return "";
+  }
+  return absolutePath;
+}
+
+function resolveRemoteBimArtifactDownloadUrl(artifact) {
+  return resolveRemoteBimArtifactDownloadUrlDomain(artifact, BIM_ARTIFACT_ALLOWED_REDIRECT_HOSTS);
+}
+
+function normalizeAllowedBimArtifactRedirectUrl(value) {
+  return normalizeAllowedBimArtifactRedirectUrlDomain(value, BIM_ARTIFACT_ALLOWED_REDIRECT_HOSTS);
+}
+
+function isAllowedBimArtifactRedirectHost(hostname) {
+  return isBimArtifactRedirectHostAllowed(hostname, BIM_ARTIFACT_ALLOWED_REDIRECT_HOSTS);
+}
+
+function escapeContentDispositionFilename(value) {
+  return sanitizeBimArtifactName(value).replace(/["\\]/g, "-");
 }
 
 function createAccessControlManager(filePath, options = {}) {
@@ -2078,6 +4750,15 @@ function createAccessControlManager(filePath, options = {}) {
       return [...store.users]
         .map((user) => toPublicUser(user))
         .sort((left, right) => left.email.localeCompare(right.email));
+    },
+    async findUserByEmail(emailInput) {
+      if (!enabled) {
+        return null;
+      }
+
+      await ensureUsersStoreSynchronized();
+      const user = getUserByEmail(emailInput);
+      return user ? toPublicUser(user) : null;
     },
     async upsertUser(payload, actorUser, optionsInput = {}) {
       if (!enabled) {
@@ -2784,6 +5465,18 @@ function parseDecimal(value) {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+function clampNumber(value, min, max, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function clampInteger(value, min, max, fallback) {
+  return Math.trunc(clampNumber(value, min, max, fallback));
+}
+
 function groupRowsByKey(rows, key) {
   const grouped = new Map();
   rows.forEach((row) => {
@@ -2794,6 +5487,327 @@ function groupRowsByKey(rows, key) {
     grouped.get(rowKey).push(row);
   });
   return grouped;
+}
+
+function getApuProjectItemKey(projectId, itemUid) {
+  return `${String(projectId || "")}:${String(itemUid || "")}`;
+}
+
+function groupApuRowsByProjectItem(rows) {
+  const grouped = new Map();
+  rows.forEach((row) => {
+    const key = getApuProjectItemKey(row.project_id, row.item_uid);
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(row);
+  });
+  return grouped;
+}
+
+function groupMetradoRowsByProjectItem(rows) {
+  const grouped = new Map();
+  rows.forEach((row) => {
+    const key = getApuProjectItemKey(row.project_id, row.item_uid);
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(row);
+  });
+  return grouped;
+}
+
+function normalizeApuCategory(value) {
+  const candidate = String(value || "").trim();
+  return APU_CATEGORY_KEYS.includes(candidate) ? candidate : "mano-obra";
+}
+
+function mapApuRowsToItems(rows) {
+  return rows.map((row, index) => ({
+    id: normalizeIdentifier(row.apu_uid, `apu-${index + 1}`),
+    resourceId: normalizeIdentifier(row.apu_resource_uid, ""),
+    subpartidaId: normalizeIdentifier(row.apu_subpartida_uid, ""),
+    category: normalizeApuCategory(row.apu_category),
+    descripcion: normalizeDescriptionText(row.apu_descripcion),
+    cuadrilla: normalizeDecimalString(row.apu_cuadrilla),
+    unidad: String(row.apu_unidad || ""),
+    cantidad: normalizeDecimalString(row.apu_cantidad),
+    precioUnitario: normalizeDecimalString(row.apu_precio_unitario),
+  }));
+}
+
+function mapMetradoRowsToItems(rows) {
+  return rows.map((row, index) => ({
+    id: normalizeIdentifier(row.metrado_uid, `metrado-${index + 1}`),
+    descripcion: normalizeDescriptionText(row.metrado_descripcion),
+    veces: normalizeDecimalString(row.metrado_veces),
+    largo: normalizeDecimalString(row.metrado_largo),
+    ancho: normalizeDecimalString(row.metrado_ancho),
+    alto: normalizeDecimalString(row.metrado_alto),
+    parcial: normalizeDecimalString(row.metrado_parcial),
+  }));
+}
+
+function mapBudgetConfigRowToSettings(row) {
+  return {
+    gastosGeneralesPercent: normalizeDecimalString(row?.gastos_generales_pct),
+    utilidadPercent: normalizeDecimalString(row?.utilidad_pct),
+    igvPercent: normalizeDecimalString(row?.igv_pct ?? 18),
+    includeIgv: row?.incluye_igv !== 0,
+  };
+}
+
+function mapPolynomialRowsToGroups(rows) {
+  return rows.map((row, index) => ({
+    id: normalizeIdentifier(row.polynomial_uid, `poly-${index + 1}`),
+    codigo: String(row.polynomial_codigo || ""),
+    descripcion: normalizeDescriptionText(row.polynomial_descripcion),
+    indice: normalizeDescriptionText(row.polynomial_indice),
+    categoria: normalizeApuCategory(row.polynomial_categoria),
+    orden: Number.parseInt(row.polynomial_order || index + 1, 10) || (index + 1),
+  }));
+}
+
+function mapUnitCatalogRowsToItems(rows) {
+  return rows.map((row, index) => ({
+    id: normalizeIdentifier(row.unit_uid, `unit-${index + 1}`),
+    codigo: normalizeUnitCode(row.unit_codigo),
+    descripcion: normalizeUnitDescription(row.unit_descripcion),
+    orden: Number.parseInt(row.unit_order || index + 1, 10) || (index + 1),
+  })).filter((unit) => unit.codigo && unit.descripcion);
+}
+
+function mapResourceCatalogRowsToItems(rows) {
+  return rows.map((row, index) => ({
+    id: normalizeIdentifier(row.resource_uid, `resource-${index + 1}`),
+    category: normalizeApuCategory(row.resource_category),
+    descripcion: normalizeDescriptionText(row.resource_descripcion),
+    unidad: String(row.resource_unidad || ""),
+    precioUnitario: normalizeDecimalString(row.resource_precio_unitario),
+    polynomialGroupId: normalizeIdentifier(row.resource_polynomial_group_uid, ""),
+    orden: Number.parseInt(row.resource_order || index + 1, 10) || (index + 1),
+  }));
+}
+
+function normalizeIncomingApuItems(itemsInput, rowInput = null) {
+  return Array.isArray(itemsInput)
+    ? itemsInput
+      .filter((item) => item && typeof item === "object")
+      .map((item, index) => {
+        const normalizedItem = {
+          id: normalizeIdentifier(item.id, `apu-${index + 1}`),
+          resourceId: normalizeIdentifier(item.resourceId, ""),
+          subpartidaId: normalizeIdentifier(item.subpartidaId, ""),
+          category: normalizeApuCategory(item.category),
+          descripcion: normalizeDescriptionText(item.descripcion),
+          cuadrilla: normalizeDecimalString(item.cuadrilla),
+          unidad: String(item.unidad || ""),
+          cantidad: normalizeDecimalString(item.cantidad),
+          precioUnitario: normalizeDecimalString(item.precioUnitario),
+        };
+        if (isIncomingApuCantidadCalculated(normalizedItem)) {
+          normalizedItem.cantidad = getIncomingApuItemCantidad(normalizedItem, rowInput).toFixed(6);
+        }
+        return normalizedItem;
+      })
+    : [];
+}
+
+function normalizeIncomingUnitCatalogItems(itemsInput) {
+  if (!Array.isArray(itemsInput)) {
+    return [];
+  }
+  const byCode = new Map();
+  itemsInput
+    .filter((item) => item && typeof item === "object")
+    .forEach((item, index) => {
+      const unit = {
+        id: normalizeIdentifier(item.id, `unit-${index + 1}`),
+        codigo: normalizeUnitCode(item.codigo),
+        descripcion: normalizeUnitDescription(item.descripcion),
+        orden: Number.parseInt(item.orden || index + 1, 10) || (index + 1),
+      };
+      if (!unit.codigo || !unit.descripcion) {
+        return;
+      }
+      byCode.set(unit.codigo.toLowerCase(), unit);
+    });
+  return Array.from(byCode.values()).sort((left, right) => left.orden - right.orden);
+}
+
+function normalizeIncomingMetradoItems(itemsInput) {
+  return Array.isArray(itemsInput)
+    ? itemsInput
+      .filter((item) => item && typeof item === "object")
+      .map((item, index) => {
+        const normalizedItem = {
+          id: normalizeIdentifier(item.id, `metrado-${index + 1}`),
+          descripcion: normalizeDescriptionText(item.descripcion),
+          veces: normalizeDecimalString(item.veces),
+          largo: normalizeDecimalString(item.largo),
+          ancho: normalizeDecimalString(item.ancho),
+          alto: normalizeDecimalString(item.alto),
+          parcial: normalizeDecimalString(item.parcial),
+        };
+        normalizedItem.parcial = getIncomingMetradoItemPartial(normalizedItem).toFixed(6);
+        return normalizedItem;
+      })
+    : [];
+}
+
+function normalizeIncomingBudgetSettings(settingsInput) {
+  const settings = settingsInput && typeof settingsInput === "object" ? settingsInput : {};
+  return {
+    gastosGeneralesPercent: normalizeDecimalString(settings.gastosGeneralesPercent),
+    utilidadPercent: normalizeDecimalString(settings.utilidadPercent),
+    igvPercent: normalizeDecimalString(settings.igvPercent ?? 18),
+    includeIgv: settings.includeIgv !== false,
+  };
+}
+
+function normalizeIncomingPolynomialGroups(itemsInput) {
+  return Array.isArray(itemsInput)
+    ? itemsInput
+      .filter((item) => item && typeof item === "object")
+      .map((item, index) => ({
+        id: normalizeIdentifier(item.id, `poly-${index + 1}`),
+        codigo: String(item.codigo || "").trim(),
+        descripcion: normalizeDescriptionText(item.descripcion),
+        indice: normalizeDescriptionText(item.indice),
+        categoria: normalizeApuCategory(item.categoria),
+        orden: Number.parseInt(item.orden || index + 1, 10) || (index + 1),
+      }))
+      .sort((left, right) => left.orden - right.orden)
+    : [];
+}
+
+function normalizeIncomingResourceCatalogItems(itemsInput) {
+  return Array.isArray(itemsInput)
+    ? itemsInput
+      .filter((item) => item && typeof item === "object")
+      .map((item, index) => ({
+        id: normalizeIdentifier(item.id, `resource-${index + 1}`),
+        category: normalizeApuCategory(item.category),
+        descripcion: normalizeDescriptionText(item.descripcion),
+        unidad: String(item.unidad || ""),
+        precioUnitario: normalizeDecimalString(item.precioUnitario),
+        polynomialGroupId: normalizeIdentifier(item.polynomialGroupId, ""),
+        orden: Number.parseInt(item.orden || index + 1, 10) || (index + 1),
+      }))
+      .sort((left, right) => {
+        const leftCategoryIndex = APU_CATEGORY_KEYS.indexOf(left.category);
+        const rightCategoryIndex = APU_CATEGORY_KEYS.indexOf(right.category);
+        if (leftCategoryIndex !== rightCategoryIndex) {
+          return leftCategoryIndex - rightCategoryIndex;
+        }
+        return left.orden - right.orden;
+      })
+    : [];
+}
+
+function isIncomingApuCantidadCalculated(item) {
+  const category = normalizeApuCategory(item?.category);
+  return category === "mano-obra" || category === "equipos";
+}
+
+function getIncomingApuItemRendimiento(item, rowInput = null) {
+  const category = normalizeApuCategory(item?.category);
+  if (category === "mano-obra") return parseDecimal(rowInput?.rendimientoManoObra);
+  if (category === "equipos") return parseDecimal(rowInput?.rendimientoEquipos);
+  return 0;
+}
+
+function getIncomingApuItemCantidad(item, rowInput = null) {
+  if (!isIncomingApuCantidadCalculated(item)) return parseDecimal(item?.cantidad);
+  const rendimiento = getIncomingApuItemRendimiento(item, rowInput);
+  if (rendimiento <= 0) return 0;
+  return (parseDecimal(item?.cuadrilla) * APU_WORKDAY_HOURS) / rendimiento;
+}
+
+function getIncomingApuTotal(items, rowInput = null) {
+  return normalizeIncomingApuItems(items, rowInput).reduce((sum, item) => (
+    sum + (getIncomingApuItemCantidad(item, rowInput) * parseDecimal(item.precioUnitario))
+  ), 0);
+}
+
+function parseMetradoFactor(value) {
+  if (value === null || value === undefined || value === "") return 1;
+  return parseDecimal(value);
+}
+
+function getIncomingMetradoItemPartial(item) {
+  return parseMetradoFactor(item?.veces)
+    * parseMetradoFactor(item?.largo)
+    * parseMetradoFactor(item?.ancho)
+    * parseMetradoFactor(item?.alto);
+}
+
+function getIncomingMetradoTotal(items) {
+  return normalizeIncomingMetradoItems(items).reduce((sum, item) => sum + getIncomingMetradoItemPartial(item), 0);
+}
+
+function resolveIncomingBudgetRows(rowsInput) {
+  const rawRows = Array.isArray(rowsInput) ? rowsInput : [];
+  const rows = rawRows.map((row, index) => ({
+    ...row,
+    id: normalizeIdentifier(row?.id, `row-${index + 1}`),
+  }));
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  const memo = new Map();
+
+  const resolveRow = (rowId, visiting = new Set()) => {
+    const row = rowById.get(rowId);
+    if (!row) {
+      return null;
+    }
+    if (memo.has(rowId)) {
+      return memo.get(rowId);
+    }
+    if (visiting.has(rowId)) {
+      const cycleRow = {
+        ...row,
+        costo: "0.000000",
+        apuItems: normalizeIncomingApuItems(row.apuItems, row),
+        metradoItems: normalizeIncomingMetradoItems(row.metradoItems),
+      };
+      memo.set(rowId, cycleRow);
+      return cycleRow;
+    }
+
+    const nextVisiting = new Set(visiting);
+    nextVisiting.add(rowId);
+    const metradoItems = normalizeIncomingMetradoItems(row.metradoItems);
+    const metradoTradicional = metradoItems.length > 0
+      ? getIncomingMetradoTotal(metradoItems).toFixed(6)
+      : normalizeDecimalString(row.metradoTradicional ?? row.metrado);
+    const apuItems = normalizeIncomingApuItems(row.apuItems, row).map((item) => {
+      if (!item.subpartidaId) {
+        return item;
+      }
+      const referenced = resolveRow(item.subpartidaId, nextVisiting);
+      return {
+        ...item,
+        resourceId: "",
+        descripcion: item.descripcion || normalizeDescriptionText(referenced?.descripcion),
+        unidad: item.unidad || String(referenced?.unidad || ""),
+        precioUnitario: parseDecimal(referenced?.costo).toFixed(6),
+      };
+    });
+    const resolvedRow = {
+      ...row,
+      metradoTradicional,
+      metradoItems,
+      apuItems,
+    };
+    resolvedRow.costo = apuItems.length > 0
+      ? getIncomingApuTotal(apuItems, resolvedRow).toFixed(6)
+      : normalizeDecimalString(row.costo);
+    memo.set(rowId, resolvedRow);
+    return resolvedRow;
+  };
+
+  rows.forEach((row) => resolveRow(row.id));
+  return rows.map((row) => memo.get(row.id) || row);
 }
 
 function normalizeDecimalString(value) {
@@ -3148,51 +6162,281 @@ function buildProjectAccessOptions(projectsInput) {
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function normalizeIncomingRevitExport(payload) {
-  const model = payload?.model && typeof payload.model === "object"
-    ? payload.model
-    : {};
-  const options = payload?.options && typeof payload.options === "object"
-    ? payload.options
-    : {};
-  const rawRows = Array.isArray(payload?.rows)
-    ? payload.rows
-    : (Array.isArray(payload?.items) ? payload.items : []);
+function parseBimArtifactAllowedRedirectHosts(value) {
+  return parseBimArtifactAllowedRedirectHostsDomain(value);
+}
+
+function sanitizePathSegment(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 220);
+}
+
+function mapBimJobRow(row) {
+  const status = normalizeBimJobStatus(row.status_name, "queued");
+  const createdAt = normalizeIsoString(row.created_at);
+  const updatedAt = normalizeIsoString(row.updated_at);
+  const claimedAt = row.claimed_at ? normalizeIsoString(row.claimed_at) : "";
+  const completedAt = row.completed_at ? normalizeIsoString(row.completed_at) : "";
+  const now = new Date().toISOString();
+  const queueEndAt = claimedAt || (status === "queued" ? now : (completedAt || updatedAt));
+  const totalEndAt = completedAt || (isFinishedBimJobStatus(status) ? updatedAt : now);
+  const runStartAt = status === "queued" ? "" : (claimedAt || createdAt);
 
   return {
-    projectId: normalizeIdentifier(payload?.projectId || payload?.projectUid, ""),
-    exportUid: normalizeIdentifier(payload?.exportUid || payload?.uid, randomUUID()),
-    documentUid: normalizeIdentifier(model.documentUid || payload?.documentUid, ""),
-    modelGuid: normalizeIdentifier(model.modelGuid || payload?.modelGuid, ""),
-    modelPath: normalizeText(model.modelPath || payload?.modelPath, ""),
-    revitVersion: normalizeText(model.revitVersion || payload?.revitVersion, ""),
-    addinVersion: normalizeText(model.addinVersion || payload?.addinVersion, ""),
-    exportedBy: normalizeText(payload?.exportedBy || model.exportedBy || payload?.userName, "Revit Addin"),
-    exportedAt: normalizeIsoString(payload?.exportedAt || model.exportedAt || Date.now()),
-    rows: rawRows.map(normalizeIncomingRevitExportRow),
-    options: {
-      syncItemMetradoBim: options.syncItemMetradoBim !== false,
-    },
+    internalId: row.internal_id,
+    id: normalizeIdentifier(row.job_uid, ""),
+    projectId: normalizeIdentifier(row.project_uid, ""),
+    targetMode: normalizeBimJobTargetMode(row.target_mode),
+    commandType: normalizeBimJobCommandType(row.command_type),
+    status,
+    stage: normalizeText(row.stage_name, getDefaultBimJobStage(row.status_name)),
+    percent: clampNumber(row.percent_value, 0, 100, 0),
+    payload: parseJsonObject(row.payload_json) || {},
+    modelIdentity: parseJsonObject(row.model_identity_json) || {},
+    result: parseJsonObject(row.result_json) || {},
+    error: normalizeText(row.error_text, ""),
+    createdBy: normalizeText(row.created_by, "Usuario"),
+    claimedBy: normalizeText(row.claimed_by, ""),
+    claimedAt,
+    createdAt,
+    updatedAt,
+    completedAt,
+    queueWaitSeconds: diffIsoSeconds(createdAt, queueEndAt),
+    runSeconds: runStartAt ? diffIsoSeconds(runStartAt, totalEndAt) : 0,
+    totalSeconds: diffIsoSeconds(createdAt, totalEndAt),
+    logs: [],
   };
 }
 
-function normalizeIncomingRevitExportRow(row) {
+function mapBimJobOperationRow(row) {
+  const payload = parseJsonObject(row.payload_json) || {};
   return {
-    itemUid: normalizeIdentifier(row?.itemUid || row?.rowId || row?.itemId, ""),
-    elementId: normalizeNullableInteger(row?.elementId ?? row?.revitElementId),
-    elementUniqueId: normalizeIdentifier(
-      row?.elementUniqueId || row?.revitUniqueId || row?.uniqueId,
-      "",
-    ),
-    categoria: normalizeText(row?.categoria || row?.category, ""),
-    familia: normalizeText(row?.familia || row?.family, ""),
-    tipo: normalizeText(row?.tipo || row?.type, ""),
-    codigoPartida: normalizeText(row?.codigoPartida || row?.codificacion || row?.partida, ""),
-    descripcion: normalizeDescriptionText(row?.descripcion || row?.description),
-    unidad: normalizeText(row?.unidad || row?.unit, ""),
-    cantidad: parseDecimal(row?.cantidad ?? row?.quantity ?? row?.metradoBim ?? row?.metrado ?? 0),
-    parametrosJson: normalizeJsonObject(row?.parametros ?? row?.parameters),
+    operationType: normalizeText(payload.operationType || row.operation_type, "parameter-write"),
+    elementId: normalizeNullableInteger(payload.elementId ?? row.element_id) || 0,
+    elementUniqueId: normalizeIdentifier(payload.elementUniqueId || row.element_unique_id, ""),
+    parameterName: normalizeText(payload.parameterName || row.parameter_name, ""),
+    value: normalizeText(payload.value ?? row.value_text ?? "", ""),
   };
+}
+
+function mapBimJobArtifactRow(row) {
+  return {
+    id: normalizeIdentifier(row.artifact_uid, ""),
+    kind: normalizeBimArtifactKind(row.artifact_kind),
+    name: normalizeText(row.artifact_name, "artifact"),
+    contentType: normalizeText(row.content_type, "application/octet-stream"),
+    storageProvider: normalizeText(row.storage_provider, "local"),
+    storageUri: normalizeText(row.storage_uri, ""),
+    sizeBytes: Number(row.size_bytes || 0),
+    checksumSha256: normalizeIdentifier(row.checksum_sha256, ""),
+    metadata: parseJsonObject(row.metadata_json) || {},
+    createdAt: normalizeIsoString(row.created_at),
+  };
+}
+
+function createEmptyBimJobQueueSummary() {
+  return {
+    total: 0,
+    queued: 0,
+    active: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    activeRevit: 0,
+    activeRevitQueued: 0,
+    activeRevitProcessing: 0,
+    cloudModel: 0,
+    cloudModelQueued: 0,
+    cloudModelProcessing: 0,
+    oldestQueuedAt: "",
+    oldestQueuedAgeSeconds: 0,
+    oldestActiveRevitQueuedAt: "",
+    oldestActiveRevitQueuedAgeSeconds: 0,
+    oldestActiveAt: "",
+    latestCompletedAt: "",
+    oldestActiveAgeSeconds: 0,
+    generatedAt: new Date().toISOString(),
+    bridgePresence: summarizeBimBridgePresence([], { ttlSeconds: BIM_BRIDGE_PRESENCE_TTL_SECONDS }),
+  };
+}
+
+function mapBimJobQueueSummaryRows(rows) {
+  const summary = createEmptyBimJobQueueSummary();
+  const activeStatuses = new Set(["queued", "claimed", "running", "applying"]);
+
+  rows.forEach((row) => {
+    const status = normalizeBimJobStatus(row.status_name, "queued");
+    const targetMode = normalizeBimJobTargetMode(row.target_mode);
+    const count = Number(row.job_count || 0);
+    summary.total += count;
+
+    if (status === "queued") {
+      summary.queued += count;
+      summary.oldestQueuedAt = getEarlierIsoString(summary.oldestQueuedAt, row.oldest_created_at);
+    } else if (status === "completed") {
+      summary.completed += count;
+      summary.latestCompletedAt = getLaterIsoString(summary.latestCompletedAt, row.latest_completed_at || row.latest_updated_at);
+    } else if (status === "failed") {
+      summary.failed += count;
+    } else if (status === "cancelled") {
+      summary.cancelled += count;
+    }
+
+    if (activeStatuses.has(status)) {
+      summary.active += count;
+      summary.oldestActiveAt = getEarlierIsoString(summary.oldestActiveAt, row.oldest_created_at);
+      if (targetMode === "active-revit") {
+        summary.activeRevit += count;
+        if (status === "queued") {
+          summary.activeRevitQueued += count;
+          summary.oldestActiveRevitQueuedAt = getEarlierIsoString(summary.oldestActiveRevitQueuedAt, row.oldest_created_at);
+        } else {
+          summary.activeRevitProcessing += count;
+        }
+      } else if (targetMode === "cloud-model") {
+        summary.cloudModel += count;
+        if (status === "queued") {
+          summary.cloudModelQueued += count;
+        } else {
+          summary.cloudModelProcessing += count;
+        }
+      }
+    }
+  });
+
+  if (summary.oldestQueuedAt) {
+    const oldestQueuedMs = new Date(summary.oldestQueuedAt).getTime();
+    if (Number.isFinite(oldestQueuedMs)) {
+      summary.oldestQueuedAgeSeconds = Math.max(0, Math.floor((Date.now() - oldestQueuedMs) / 1000));
+    }
+  }
+
+  if (summary.oldestActiveRevitQueuedAt) {
+    const oldestActiveRevitQueuedMs = new Date(summary.oldestActiveRevitQueuedAt).getTime();
+    if (Number.isFinite(oldestActiveRevitQueuedMs)) {
+      summary.oldestActiveRevitQueuedAgeSeconds = Math.max(0, Math.floor((Date.now() - oldestActiveRevitQueuedMs) / 1000));
+    }
+  }
+
+  if (summary.oldestActiveAt) {
+    const oldestActiveMs = new Date(summary.oldestActiveAt).getTime();
+    if (Number.isFinite(oldestActiveMs)) {
+      summary.oldestActiveAgeSeconds = Math.max(0, Math.floor((Date.now() - oldestActiveMs) / 1000));
+    }
+  }
+
+  return summary;
+}
+
+function mapBimBridgeHeartbeatRow(row) {
+  return {
+    bridgeId: row.bridge_id || "",
+    projectId: row.project_uid || "",
+    requestedBy: row.requested_by || "",
+    activeModelIdentity: normalizeJsonObject(row.model_identity_json) || {},
+    lastSeenAt: normalizeOptionalIsoString(row.last_seen_at),
+  };
+}
+
+function getEarlierIsoString(currentValue, candidateValue) {
+  const candidate = normalizeOptionalIsoString(candidateValue);
+  if (!candidate) {
+    return currentValue || "";
+  }
+  if (!currentValue) {
+    return candidate;
+  }
+  return new Date(candidate).getTime() < new Date(currentValue).getTime() ? candidate : currentValue;
+}
+
+function getLaterIsoString(currentValue, candidateValue) {
+  const candidate = normalizeOptionalIsoString(candidateValue);
+  if (!candidate) {
+    return currentValue || "";
+  }
+  if (!currentValue) {
+    return candidate;
+  }
+  return new Date(candidate).getTime() > new Date(currentValue).getTime() ? candidate : currentValue;
+}
+
+function normalizeOptionalIsoString(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function diffIsoSeconds(startIso, endIso) {
+  const startMs = new Date(startIso || "").getTime();
+  const endMs = new Date(endIso || "").getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return 0;
+  }
+  return Math.floor((endMs - startMs) / 1000);
+}
+
+function buildBimJobCreationLockName(modelKeyHash) {
+  const hash = normalizeIdentifier(modelKeyHash, "");
+  return `mtrd:bim:create:${hash.slice(0, 48)}`;
+}
+
+function buildBimApplyJobCreationLockName(previewJobUid) {
+  const hash = createHash("sha256")
+    .update(normalizeIdentifier(previewJobUid, ""))
+    .digest("hex");
+  return `mtrd:bim:apply:${hash.slice(0, 48)}`;
+}
+
+function canCreateBimApplyJob(job) {
+  return canCreateBimApplyJobFromPreviewDomain(job);
+}
+
+function buildBimPreviewSummary(resultInput) {
+  const result = normalizeJsonObject(resultInput) || {};
+  return {
+    documentTitle: normalizeText(result.documentTitle, ""),
+    modelPath: normalizeText(result.modelPath, ""),
+    elementCount: Number.isFinite(Number(result.elementCount)) ? Number(result.elementCount) : 0,
+    processedElements: Number.isFinite(Number(result.processedElements)) ? Number(result.processedElements) : 0,
+    processedBatches: Number.isFinite(Number(result.processedBatches)) ? Number(result.processedBatches) : 0,
+    commandType: normalizeBimJobCommandType(result.commandType),
+  };
+}
+
+function getDefaultBimJobStage(status) {
+  const normalized = normalizeBimJobStatus(status, "queued");
+  if (normalized === "queued") return "En cola";
+  if (normalized === "claimed") return "Tomado por Revit";
+  if (normalized === "running") return "Analizando";
+  if (normalized === "applying") return "Aplicando";
+  if (normalized === "completed") return "Completado";
+  if (normalized === "failed") return "Fallido";
+  return "Cancelado";
+}
+
+function shouldRefreshBimJobCache(payload) {
+  return shouldRefreshBimJobCacheDomain(payload);
+}
+
+function shouldReadBimJobCache(payload, commandType) {
+  return shouldReadBimJobCacheDomain(payload, commandType);
+}
+
+function shouldPersistBimJobCache(payload, commandType) {
+  return shouldPersistBimJobCacheDomain(payload, commandType);
+}
+
+function shouldReuseActiveBimJob(payload, commandType) {
+  return shouldReuseActiveBimJobDomain(payload, commandType);
+}
+
+function buildBimJobCacheKey(projectUid, targetMode, commandType, modelIdentityInput, payloadInput = {}) {
+  return buildBimJobCacheKeyDomain(projectUid, targetMode, commandType, modelIdentityInput, payloadInput);
 }
 
 function normalizeIncomingProject(project, index) {
@@ -3205,48 +6449,13 @@ function normalizeIncomingProject(project, index) {
     rows: Array.isArray(project?.rows) ? project.rows : [],
     auditEntries: Array.isArray(project?.auditEntries) ? project.auditEntries : [],
     snapshots: Array.isArray(project?.snapshots) ? project.snapshots : [],
+    budgetSettings: normalizeIncomingBudgetSettings(project?.budgetSettings),
+    polynomialGroups: normalizeIncomingPolynomialGroups(project?.polynomialGroups),
+    unitCatalogItems: normalizeIncomingUnitCatalogItems(project?.unitCatalogItems),
+    resourceCatalogItems: normalizeIncomingResourceCatalogItems(project?.resourceCatalogItems),
     collapsedIds: Array.isArray(project?.collapsedIds) ? project.collapsedIds : [],
     createdAt,
     updatedAt,
-  };
-}
-
-function buildRevitImportStateFromState(statePayload, searchParams = new URLSearchParams()) {
-  const projects = Array.isArray(statePayload?.projects) ? statePayload.projects : [];
-  const requestedProjectUid = normalizeIdentifier(
-    searchParams.get("projectId") || searchParams.get("projectUid"),
-    "",
-  );
-  const projectUid = resolveExistingProjectUid(
-    projects.map((project) => ({
-      project_uid: project.id,
-    })),
-    requestedProjectUid || statePayload?.currentProjectId,
-  );
-  const project = projects.find((candidate) => candidate.id === projectUid) || projects[0] || null;
-  if (!project) {
-    return {
-      currentProjectId: null,
-      projectId: null,
-      projectName: "",
-      project: null,
-      rows: [],
-    };
-  }
-
-  const rows = addCodigoPartidaToRows(Array.isArray(project.rows) ? project.rows : []);
-  const compactProject = {
-    id: project.id,
-    name: project.name || "",
-    rows,
-  };
-
-  return {
-    currentProjectId: compactProject.id,
-    projectId: compactProject.id,
-    projectName: compactProject.name,
-    project: compactProject,
-    rows,
   };
 }
 
@@ -3288,6 +6497,14 @@ function normalizeIdentifier(value, fallback) {
 function normalizeText(value, fallback) {
   const text = String(value || "").trim().replace(/\s+/g, " ");
   return text || fallback;
+}
+
+function normalizeUnitCode(value) {
+  return String(value || "").trim().replace(/\s+/g, "").slice(0, 30);
+}
+
+function normalizeUnitDescription(value) {
+  return normalizeText(value, "").slice(0, 180);
 }
 
 function normalizeDescriptionText(value, fallback = "") {
@@ -3392,8 +6609,39 @@ function normalizeNullableInteger(value) {
 }
 
 function normalizeJsonObject(value) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
+  }
+  return value;
+}
+
+function stableJsonStringify(value) {
+  return JSON.stringify(sortJsonValue(value));
+}
+
+function sortJsonValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValue);
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value)
+      .sort()
+      .reduce((next, key) => {
+        next[key] = sortJsonValue(value[key]);
+        return next;
+      }, {});
   }
   return value;
 }
@@ -3530,6 +6778,15 @@ function readIncomingApiKey(request) {
   return "";
 }
 
+function resolveRequestBaseUrl(request) {
+  const forwardedProto = String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const protocol = ["http", "https"].includes(forwardedProto) ? forwardedProto : "http";
+  const forwardedHost = String(request.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const requestHost = String(request.headers.host || "").trim();
+  const resolvedHost = forwardedHost || requestHost || `${host}:${port}`;
+  return `${protocol}://${resolvedHost.replace(/\/+$/, "")}/`;
+}
+
 function resolveClientIp(request) {
   const forwarded = String(request.headers["x-forwarded-for"] || "")
     .split(",")[0]
@@ -3577,7 +6834,7 @@ async function serveStaticAsset(pathname, response, method) {
   try {
     fileBuffer = await readFile(absolutePath);
   } catch {
-    const acceptsHtmlFallback = method === "GET"
+    const acceptsHtmlFallback = ["GET", "HEAD"].includes(method)
       && !path.extname(safePath)
       && fs.existsSync(path.join(staticRoot, "index.html"));
     if (!acceptsHtmlFallback) {

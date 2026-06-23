@@ -12,6 +12,9 @@ describe("React workspace route mapping", () => {
   it("maps the main budget paths to React views", () => {
     expect(VIEW_BY_ROUTE["/itemizado"]).toBe("itemizado");
     expect(VIEW_BY_ROUTE["/presupuesto"]).toBe("presupuesto");
+    expect(VIEW_BY_ROUTE["/base-recursos"]).toBe("base-recursos");
+    expect(VIEW_BY_ROUTE["/analisis-costos-unitarios"]).toBe("analisis-costos-unitarios");
+    expect(VIEW_BY_ROUTE["/formula-polinomica"]).toBe("formula-polinomica");
     expect(VIEW_BY_ROUTE["/control-bim"]).toBe("control-bim");
     expect(VIEW_BY_ROUTE["/auditoria"]).toBe("auditoria");
     expect(VIEW_BY_ROUTE["/usuarios"]).toBe("usuarios");

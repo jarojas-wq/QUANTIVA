@@ -2,6 +2,13 @@ import type { ExportColumnSchema } from "./budget-config";
 import { EXPORT_COLUMN_SCHEMAS } from "./budget-config";
 import { parseDecimal } from "./budget-domain";
 
+export interface XlsxWorksheet {
+  name: string;
+  title: string;
+  rows: Array<Record<string, string | number>>;
+  columns: ExportColumnSchema[];
+}
+
 export function downloadBlobFile(fileName: string, blob: Blob) {
   const url = window.URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -18,9 +25,96 @@ export function buildXlsxWorkbook(
   rows: Array<Record<string, string | number>>,
   columns: ExportColumnSchema[] = EXPORT_COLUMN_SCHEMAS.rvt
 ) {
+  return buildXlsxWorkbookFromSheets([
+    {
+      name: "Exportacion",
+      title,
+      rows,
+      columns
+    }
+  ]);
+}
+
+export function buildXlsxWorkbookFromSheets(sheetsInput: XlsxWorksheet[]) {
+  const sheets = sheetsInput.length > 0
+    ? sheetsInput
+    : [{ name: "Exportacion", title: "Exportacion", rows: [], columns: EXPORT_COLUMN_SCHEMAS.rvt }];
+  const timestamp = new Date().toISOString();
+  const worksheetEntries = sheets.map((sheet, index) => ({
+    path: `xl/worksheets/sheet${index + 1}.xml`,
+    data: buildWorksheetXml(sheet.rows, sheet.columns)
+  }));
+  const sheetNodes = sheets
+    .map((sheet, index) => (
+      `<sheet name="${escapeXml(getSafeSheetName(sheet.name || sheet.title || `Hoja ${index + 1}`))}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`
+    ))
+    .join("");
+  const worksheetOverrides = sheets
+    .map((_, index) => `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`)
+    .join("");
+  const worksheetRelationships = sheets
+    .map((_, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`)
+    .join("");
+
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>${sheetNodes}</sheets>
+</workbook>`;
+
+  const stylesXml = buildStylesXml();
+
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  ${worksheetOverrides}
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>`;
+  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>`;
+  const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  ${worksheetRelationships}
+  <Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Quantiva</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop>
+  <HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>${sheets.length}</vt:i4></vt:variant></vt:vector></HeadingPairs>
+  <TitlesOfParts><vt:vector size="${sheets.length}" baseType="lpstr">${sheets.map((sheet, index) => `<vt:lpstr>${escapeXml(getSafeSheetName(sheet.name || sheet.title || `Hoja ${index + 1}`))}</vt:lpstr>`).join("")}</vt:vector></TitlesOfParts>
+</Properties>`;
+  const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>${escapeXml(sheets[0]?.title || "Exportacion")}</dc:title><dc:creator>Quantiva</dc:creator><cp:lastModifiedBy>Quantiva</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">${timestamp}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">${timestamp}</dcterms:modified>
+</cp:coreProperties>`;
+
+  return createZipBlob(
+    [
+      { path: "[Content_Types].xml", data: contentTypesXml },
+      { path: "_rels/.rels", data: rootRelsXml },
+      { path: "docProps/app.xml", data: appXml },
+      { path: "docProps/core.xml", data: coreXml },
+      { path: "xl/workbook.xml", data: workbookXml },
+      { path: "xl/_rels/workbook.xml.rels", data: workbookRelsXml },
+      { path: "xl/styles.xml", data: stylesXml },
+      ...worksheetEntries
+    ],
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+}
+
+function buildWorksheetXml(rows: Array<Record<string, string | number>>, columns: ExportColumnSchema[] = EXPORT_COLUMN_SCHEMAS.rvt) {
   const activeColumns = columns.length > 0 ? columns : EXPORT_COLUMN_SCHEMAS.rvt;
   const headers = activeColumns.map((column) => String(column.header || "").trim() || column.key);
-  const timestamp = new Date().toISOString();
   const worksheetRows = [
     `<row r="1">${headers
       .map((header, index) => buildInlineStringCell(getExcelCellRef(index, 1), header, 1))
@@ -57,12 +151,11 @@ export function buildXlsxWorkbook(
   <sheetData>${worksheetRows}</sheetData>
 </worksheet>`;
 
-  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="Exportacion" sheetId="1" r:id="rId1"/></sheets>
-</workbook>`;
+  return worksheetXml;
+}
 
-  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+function buildStylesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts>
   <fonts count="2">
@@ -86,54 +179,14 @@ export function buildXlsxWorkbook(
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
+}
 
-  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
-  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
-</Types>`;
-  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
-  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
-</Relationships>`;
-  const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
-  <Application>Quantiva</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop>
-  <HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant></vt:vector></HeadingPairs>
-  <TitlesOfParts><vt:vector size="1" baseType="lpstr"><vt:lpstr>Exportacion</vt:lpstr></vt:vector></TitlesOfParts>
-</Properties>`;
-  const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <dc:title>${escapeXml(title)}</dc:title><dc:creator>Quantiva</dc:creator><cp:lastModifiedBy>Quantiva</cp:lastModifiedBy>
-  <dcterms:created xsi:type="dcterms:W3CDTF">${timestamp}</dcterms:created>
-  <dcterms:modified xsi:type="dcterms:W3CDTF">${timestamp}</dcterms:modified>
-</cp:coreProperties>`;
-
-  return createZipBlob(
-    [
-      { path: "[Content_Types].xml", data: contentTypesXml },
-      { path: "_rels/.rels", data: rootRelsXml },
-      { path: "docProps/app.xml", data: appXml },
-      { path: "docProps/core.xml", data: coreXml },
-      { path: "xl/workbook.xml", data: workbookXml },
-      { path: "xl/_rels/workbook.xml.rels", data: workbookRelsXml },
-      { path: "xl/styles.xml", data: stylesXml },
-      { path: "xl/worksheets/sheet1.xml", data: worksheetXml }
-    ],
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  );
+function getSafeSheetName(value: string) {
+  return String(value || "Hoja")
+    .replace(/[\\/*?:[\]]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 31) || "Hoja";
 }
 
 function buildInlineStringCell(cellRef: string, value: unknown, styleIndex = 0) {

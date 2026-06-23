@@ -1,4 +1,4 @@
-import type { AuditFilterKey, ViewKey } from "../../domain/models";
+import type { ApuCategory, AuditFilterKey, UnitCatalogItem, ViewKey } from "../../domain/models";
 
 export const THEME_MODES = {
   LIGHT: "light",
@@ -12,27 +12,36 @@ export const TREE_INDENT_STEP = 16;
 export const METRADO_TYPE_OPTIONS = ["Tradicional", "Revit"];
 export const DEFAULT_METRADO_RULE = "Encofrado";
 export const METRADO_RULE_OPTIONS = [DEFAULT_METRADO_RULE];
-export const UNIDAD_PARTIDA_OPTIONS = [
-  "und",
-  "m",
-  "ml",
-  "m2",
-  "m3",
-  "cm",
-  "km",
-  "kg",
-  "g",
-  "tn",
-  "l",
-  "ha",
-  "h",
-  "dia",
-  "mes",
-  "pza",
-  "jgo",
-  "glb",
-  "lote",
-  "paquete"
+export const DEFAULT_UNIT_CATALOG_ITEMS: UnitCatalogItem[] = [
+  { id: "default-unit-und", codigo: "und", descripcion: "Unidad", orden: 1 },
+  { id: "default-unit-m", codigo: "m", descripcion: "Metro", orden: 2 },
+  { id: "default-unit-ml", codigo: "ml", descripcion: "Metro lineal", orden: 3 },
+  { id: "default-unit-m2", codigo: "m2", descripcion: "Metro cuadrado", orden: 4 },
+  { id: "default-unit-m3", codigo: "m3", descripcion: "Metro cubico", orden: 5 },
+  { id: "default-unit-cm", codigo: "cm", descripcion: "Centimetro", orden: 6 },
+  { id: "default-unit-km", codigo: "km", descripcion: "Kilometro", orden: 7 },
+  { id: "default-unit-kg", codigo: "kg", descripcion: "Kilogramo", orden: 8 },
+  { id: "default-unit-g", codigo: "g", descripcion: "Gramo", orden: 9 },
+  { id: "default-unit-tn", codigo: "tn", descripcion: "Tonelada", orden: 10 },
+  { id: "default-unit-l", codigo: "l", descripcion: "Litro", orden: 11 },
+  { id: "default-unit-ha", codigo: "ha", descripcion: "Hectarea", orden: 12 },
+  { id: "default-unit-h", codigo: "h", descripcion: "Horas", orden: 13 },
+  { id: "default-unit-dia", codigo: "dia", descripcion: "Dia", orden: 14 },
+  { id: "default-unit-mes", codigo: "mes", descripcion: "Mes", orden: 15 },
+  { id: "default-unit-pza", codigo: "pza", descripcion: "Pieza", orden: 16 },
+  { id: "default-unit-jgo", codigo: "jgo", descripcion: "Juego", orden: 17 },
+  { id: "default-unit-glb", codigo: "glb", descripcion: "Global", orden: 18 },
+  { id: "default-unit-lote", codigo: "lote", descripcion: "Lote", orden: 19 },
+  { id: "default-unit-paquete", codigo: "paquete", descripcion: "Paquete", orden: 20 }
+];
+export const UNIDAD_PARTIDA_OPTIONS = DEFAULT_UNIT_CATALOG_ITEMS.map((unit) => unit.codigo);
+
+export const APU_CATEGORY_OPTIONS: Array<{ key: ApuCategory; label: string }> = [
+  { key: "mano-obra", label: "Mano de obra" },
+  { key: "materiales", label: "Materiales" },
+  { key: "equipos", label: "Equipos" },
+  { key: "subcontratos", label: "Subcontratos" },
+  { key: "otros", label: "Otros" }
 ];
 
 export const AUDIT_FILTER_CONFIGS: Record<AuditFilterKey, { label: string }> = {
@@ -48,6 +57,9 @@ export const USER_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export const USER_PROJECT_VIEW_OPTIONS: Array<{ key: ViewKey; label: string }> = [
   { key: "itemizado", label: "Itemizado" },
   { key: "presupuesto", label: "Presupuesto" },
+  { key: "base-recursos", label: "Base Recursos" },
+  { key: "analisis-costos-unitarios", label: "Analisis CU" },
+  { key: "formula-polinomica", label: "Formula Polinomica" },
   { key: "control-bim", label: "Control BIM" },
   { key: "auditoria", label: "Auditoria" },
   { key: "exportaciones-rvt", label: "RVT" },
@@ -124,11 +136,13 @@ export interface ViewConfig {
   key: ViewKey;
   label: string;
   matrixTitle: string;
-  contentType: "table" | "audit" | "users" | "bim-control" | "export";
+  contentType: "table" | "audit" | "users" | "bim-control" | "export" | "resources" | "polynomial";
   searchEnabled: boolean;
   helperText: string;
   shortcutText: string;
   allowsStructureEditing: boolean;
+  supportsApuExpansion?: boolean;
+  supportsMetradoExpansion?: boolean;
   exportMode?: "rvt" | "presupuesto";
   columns: ViewColumn[];
 }
@@ -162,6 +176,7 @@ export const VIEW_CONFIGS: Record<ViewKey, ViewConfig> = {
     helperText: "Aqui editas el presupuesto y revisas metrados y parciales directamente sobre la matriz.",
     shortcutText: "Usa el buscador superior para ubicar partidas y revisar rapidamente los importes del presupuesto.",
     allowsStructureEditing: false,
+    supportsMetradoExpansion: true,
     columns: [
       { key: "partida", label: "Codigo de partida", colClass: "col-partida", widthVar: "--partida-col-width", type: "partida" },
       { key: "codificacion", label: "Codificacion", colClass: "col-codificacion", widthVar: "--codificacion-col-width", type: "input", field: "codificacion", editable: false },
@@ -173,6 +188,46 @@ export const VIEW_CONFIGS: Record<ViewKey, ViewConfig> = {
       { key: "reglaMetrado", label: "Regla de metrado", colClass: "col-regla-metrado", widthVar: "--regla-metrado-col-width", type: "select", field: "reglaMetrado", editable: true, placeholder: "Selecciona", options: METRADO_RULE_OPTIONS },
       { key: "parcial", label: "Parcial", colClass: "col-parcial", widthVar: "--parcial-col-width", type: "partial" }
     ]
+  },
+  "base-recursos": {
+    key: "base-recursos",
+    label: "Base de Recursos",
+    matrixTitle: "Base de Recursos",
+    contentType: "resources",
+    searchEnabled: true,
+    helperText: "Administra los recursos por categoria para usarlos en los analisis de costos unitarios.",
+    shortcutText: "Crea recursos con unidad y precio unitario para seleccionarlos desde Recursos / Descripcion en APU.",
+    allowsStructureEditing: false,
+    columns: []
+  },
+  "analisis-costos-unitarios": {
+    key: "analisis-costos-unitarios",
+    label: "Analisis Costos Unitarios",
+    matrixTitle: "Analisis Costos Unitarios",
+    contentType: "table",
+    searchEnabled: true,
+    helperText: "Despliega una partida hoja para editar su APU y recalcular el costo unitario.",
+    shortcutText: "Despliega una partida hoja para revisar o editar sus insumos APU.",
+    allowsStructureEditing: false,
+    supportsApuExpansion: true,
+    columns: [
+      { key: "partida", label: "Codigo de partida", colClass: "col-partida", widthVar: "--partida-col-width", type: "partida" },
+      { key: "codificacion", label: "Codificacion", colClass: "col-codificacion", widthVar: "--codificacion-col-width", type: "input", field: "codificacion", editable: false },
+      { key: "descripcion", label: "Descripcion de Partida", colClass: "col-descripcion", widthVar: "--descripcion-col-width", type: "input", field: "descripcion", editable: false, inputClass: "cell-field--descripcion" },
+      { key: "unidad", label: "Unidad de Partida", colClass: "col-unidad", widthVar: "--unidad-col-width", type: "select", field: "unidad", editable: false, options: UNIDAD_PARTIDA_OPTIONS },
+      { key: "costo", label: "Costo Unitario", colClass: "col-costo", widthVar: "--costo-col-width", type: "input", field: "costo", editable: false, inputMode: "decimal" }
+    ]
+  },
+  "formula-polinomica": {
+    key: "formula-polinomica",
+    label: "Formula Polinomica",
+    matrixTitle: "Formula Polinomica",
+    contentType: "polynomial",
+    searchEnabled: false,
+    helperText: "Agrupa recursos por indice y revisa incidencias sobre el costo directo.",
+    shortcutText: "Asigna grupos polinomicos a recursos y revisa su incidencia consolidada.",
+    allowsStructureEditing: false,
+    columns: []
   },
   "control-bim": {
     key: "control-bim",
@@ -246,6 +301,9 @@ export const VIEW_CONFIGS: Record<ViewKey, ViewConfig> = {
 export const ROUTE_BY_VIEW: Record<ViewKey, string> = {
   itemizado: "/itemizado",
   presupuesto: "/presupuesto",
+  "base-recursos": "/base-recursos",
+  "analisis-costos-unitarios": "/analisis-costos-unitarios",
+  "formula-polinomica": "/formula-polinomica",
   "control-bim": "/control-bim",
   auditoria: "/auditoria",
   usuarios: "/usuarios",
