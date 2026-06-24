@@ -17,6 +17,7 @@ import {
   hasBimArtifactContent,
   hasBimArtifactReference,
   isBimArtifactRedirectHostAllowed,
+  normalizeBimArtifactKind,
   normalizeAllowedBimArtifactRedirectUrl as normalizeAllowedBimArtifactRedirectUrlDomain,
   normalizeIncomingBimArtifacts,
   parseBimArtifactAllowedRedirectHosts as parseBimArtifactAllowedRedirectHostsDomain,

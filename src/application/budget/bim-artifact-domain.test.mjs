@@ -5,6 +5,7 @@ import {
   hasBimArtifactReference,
   isBimArtifactRedirectHostAllowed,
   normalizeAllowedBimArtifactRedirectUrl,
+  normalizeBimArtifactKind,
   normalizeIncomingBimArtifacts,
   parseBimArtifactAllowedRedirectHosts,
   resolveRemoteBimArtifactDownloadUrl,
@@ -65,6 +66,11 @@ describe("BIM artifact domain", () => {
     expect(decodeBimArtifactContent(textArtifact).toString("utf8")).toBe("hola");
     expect(decodeBimArtifactContent(base64Artifact).toString("utf8")).toBe("mundo");
     expect(sanitizeBimArtifactName("../bad:name?.zip")).toBe("..-bad-name-.zip");
+  });
+
+  it("exports artifact kind normalization for backend persistence mapping", () => {
+    expect(normalizeBimArtifactKind("MANIFEST")).toBe("manifest");
+    expect(normalizeBimArtifactKind("unknown-kind")).toBe("output");
   });
 
   it("normalizes configured redirect hosts from env text", () => {

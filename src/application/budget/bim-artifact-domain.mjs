@@ -131,7 +131,7 @@ function normalizeAllowedHosts(allowedHosts) {
     : [];
 }
 
-function normalizeBimArtifactKind(value) {
+export function normalizeBimArtifactKind(value) {
   const kind = String(value || "").trim().toLowerCase();
   return BIM_ARTIFACT_KINDS.includes(kind) ? kind : "output";
 }
