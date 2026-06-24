@@ -13,6 +13,9 @@ import {
 import {
   loadLocalRevitBridgeSettings,
 } from "./bim-local-revit-settings.mjs";
+import {
+  probeBimRevitLocalSession,
+} from "./bim-revit-local-session.mjs";
 
 loadLocalEnv(path.resolve(process.cwd(), ".env"));
 
@@ -29,6 +32,7 @@ const result = {
   commandType: config.commandType,
   strict: config.strict,
   derivedConfig: derivedEnv.summary,
+  localRevitSession: null,
   bridgePresence: null,
   plan: null,
   createdJobId: "",
@@ -47,6 +51,14 @@ try {
   const health = await requestJson(config, "api/health", { auth: "none" });
   result.steps.push({ name: "health", ok: Boolean(health.ok), storage: health.storage || "" });
 
+  result.localRevitSession = loadLocalRevitSession();
+  result.steps.push({
+    name: "local-revit-session",
+    ok: result.localRevitSession?.ok === true,
+    status: result.localRevitSession?.status || "",
+    missing: result.localRevitSession?.missing || [],
+  });
+
   const bridgeSummary = await loadBridgeSummary(config);
   result.bridgePresence = bridgeSummary.summary?.bridgePresence || null;
   result.steps.push({
@@ -56,7 +68,7 @@ try {
     latestRequestedBy: result.bridgePresence?.latestRequestedBy || "",
   });
 
-  const plan = createActiveRevitE2ePlan(config, bridgeSummary.summary || {});
+  const plan = createActiveRevitE2ePlan(config, bridgeSummary.summary || {}, result.localRevitSession);
   result.plan = redactPlan(plan);
   if (!plan.ok) {
     finishSkipped(
@@ -230,6 +242,27 @@ function finishSkipped(message, missing) {
   throw new ActiveRevitE2eSkipped(message, config.strict ? 1 : 0);
 }
 
+function loadLocalRevitSession() {
+  try {
+    return {
+      checked: true,
+      attempted: true,
+      ...probeBimRevitLocalSession({
+        version: process.env.BIM_REVIT_VERSION || "2025",
+      }),
+    };
+  } catch (error) {
+    return {
+      checked: true,
+      attempted: true,
+      ok: false,
+      status: "probe-failed",
+      missing: ["REVIT_LOCAL_SESSION_PROBE"],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function redactPlan(plan = {}) {
   return {
     ok: plan.ok === true,
@@ -239,6 +272,7 @@ function redactPlan(plan = {}) {
     requestedBy: plan.requestedBy || "",
     bridgeId: plan.bridgeId || "",
     bridgeSeenAt: plan.bridgeSeenAt || "",
+    localRevitSession: plan.localRevitSession || null,
     modelIdentity: plan.modelIdentity || {},
     batchSize: plan.batchSize || 0,
   };

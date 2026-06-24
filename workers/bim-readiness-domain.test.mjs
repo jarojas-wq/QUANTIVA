@@ -145,6 +145,50 @@ describe("BIM readiness runtime domain", () => {
     });
   });
 
+  it("recommends rebuilding when the local Revit add-in DLL is older than source", () => {
+    const baseReport = {
+      ok: true,
+      readyForRealValidation: true,
+      missing: [],
+      checks: [],
+      nextCommands: [],
+    };
+    const runtimeReport = createBimReadinessRuntimeReport(baseReport, { attempted: true, ok: true }, {
+      bridgeQueueSummary: {
+        attempted: true,
+        ok: true,
+        summary: {
+          activeRevitQueued: 0,
+          bridgePresence: { online: true, onlineCount: 1 },
+        },
+      },
+      revitLocalSession: {
+        checked: true,
+        attempted: true,
+        ok: false,
+        status: "build-required",
+        version: "2025",
+        revitOpen: true,
+        manifestAssemblyLastWriteTime: "2026-06-24T10:00:00.000Z",
+        sourceRoot: "C:/repo/src/RevitModelAudit.Revit",
+        sourceLastWriteTime: "2026-06-24T10:05:00.000Z",
+        assemblyIsOlderThanSource: true,
+        missing: ["REVIT_ADDIN_BUILD_REQUIRED"],
+      },
+    });
+    const localSessionCheck = runtimeReport.checks.find((check) => check.id === "revit-local-session-runtime");
+
+    expect(runtimeReport.ok).toBe(false);
+    expect(runtimeReport.missing).toContain("REVIT_ADDIN_BUILD_REQUIRED");
+    expect(runtimeReport.nextCommands).toContain("dotnet build ..\\REVIT-MODEL-AUDITOR\\src\\RevitModelAudit.Revit\\RevitModelAudit.Revit.csproj -f net8.0-windows");
+    expect(localSessionCheck?.details).toMatchObject({
+      status: "build-required",
+      sourceRoot: "C:/repo/src/RevitModelAudit.Revit",
+      sourceLastWriteTime: "2026-06-24T10:05:00.000Z",
+      assemblyIsOlderThanSource: true,
+    });
+  });
+
   it("reports live Revit presence separately from signed-in claim readiness", () => {
     const baseReport = {
       ok: true,

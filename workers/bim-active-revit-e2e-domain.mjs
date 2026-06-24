@@ -56,8 +56,9 @@ export function normalizeActiveRevitE2eConfig(env = {}) {
   };
 }
 
-export function createActiveRevitE2ePlan(config = {}, bridgeSummary = {}) {
+export function createActiveRevitE2ePlan(config = {}, bridgeSummary = {}, localRevitSession = null) {
   const presence = normalizeBridgePresence(bridgeSummary);
+  const localSession = normalizeLocalRevitSession(localRevitSession);
   const modelIdentity = hasStableModelIdentity(config.modelIdentity)
     ? normalizeModelIdentity(config.modelIdentity)
     : normalizeModelIdentity(presence.latestModelIdentity);
@@ -65,25 +66,34 @@ export function createActiveRevitE2ePlan(config = {}, bridgeSummary = {}) {
   const missing = [];
 
   if (!config.projectId) {
-    missing.push("BIM_ACTIVE_REVIT_E2E_PROJECT_ID");
+    pushMissing(missing, "BIM_ACTIVE_REVIT_E2E_PROJECT_ID");
   }
   if (!config.sessionCookie) {
-    missing.push("BIM_ACTIVE_REVIT_E2E_SESSION_COOKIE");
+    pushMissing(missing, "BIM_ACTIVE_REVIT_E2E_SESSION_COOKIE");
   }
   if (!config.apiKey) {
-    missing.push("BIM_ACTIVE_REVIT_E2E_API_KEY");
+    pushMissing(missing, "BIM_ACTIVE_REVIT_E2E_API_KEY");
+  }
+  if (localSession.checked && !localSession.ok) {
+    const localMissing = localSession.missing.length > 0
+      ? localSession.missing
+      : ["REVIT_LOCAL_SESSION_READY"];
+    localMissing.forEach((code) => pushMissing(missing, code));
+  }
+  if (localSession.checked && localSession.ok && !localSession.activeModelLikelyOpen) {
+    pushMissing(missing, "ACTIVE_REVIT_MODEL_OPEN");
   }
   if (!presence.online) {
-    missing.push("ACTIVE_REVIT_BRIDGE_PRESENCE");
+    pushMissing(missing, "ACTIVE_REVIT_BRIDGE_PRESENCE");
   }
   if (!presence.latestRequestedBy && (presence.online || presence.latestDiagnostic.signedIn === false)) {
-    missing.push("ACTIVE_REVIT_GOOGLE_SIGN_IN");
+    pushMissing(missing, "ACTIVE_REVIT_GOOGLE_SIGN_IN");
   }
   if (!requestedBy) {
-    missing.push("ACTIVE_REVIT_BRIDGE_REQUESTED_BY");
+    pushMissing(missing, "ACTIVE_REVIT_BRIDGE_REQUESTED_BY");
   }
   if (!hasStableModelIdentity(modelIdentity)) {
-    missing.push("ACTIVE_REVIT_MODEL_IDENTITY");
+    pushMissing(missing, "ACTIVE_REVIT_MODEL_IDENTITY");
   }
 
   return {
@@ -95,6 +105,14 @@ export function createActiveRevitE2ePlan(config = {}, bridgeSummary = {}) {
     requestedBy,
     bridgeId: presence.latestBridgeId,
     bridgeSeenAt: presence.latestSeenAt,
+    localRevitSession: localSession.checked
+      ? {
+        ok: localSession.ok,
+        status: localSession.status,
+        activeModelLikelyOpen: localSession.activeModelLikelyOpen,
+        activeModelWindowTitle: localSession.activeModelWindowTitle,
+      }
+      : null,
     modelIdentity,
     batchSize: config.batchSize,
     requestedAt: config.requestedAt,
@@ -175,6 +193,43 @@ function normalizeBridgeDiagnostic(diagnostic = {}) {
   };
 }
 
+function normalizeLocalRevitSession(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      checked: false,
+      ok: false,
+      status: "",
+      missing: [],
+      activeModelLikelyOpen: false,
+      activeModelWindowTitle: "",
+    };
+  }
+
+  const processes = Array.isArray(input.processes) ? input.processes : [];
+  const activeModelWindowTitle = processes
+    .map((process) => normalizeText(process?.mainWindowTitle, ""))
+    .find(isLikelyActiveModelWindowTitle) || "";
+  return {
+    checked: input.checked !== false,
+    ok: input.ok === true,
+    status: normalizeText(input.status, ""),
+    missing: uniqueStrings(Array.isArray(input.missing) ? input.missing : []),
+    activeModelLikelyOpen: Boolean(activeModelWindowTitle),
+    activeModelWindowTitle,
+  };
+}
+
+function isLikelyActiveModelWindowTitle(title) {
+  const text = normalizeText(title, "");
+  if (!text) {
+    return false;
+  }
+  if (/\[\s*inicio\s*\]/i.test(text)) {
+    return false;
+  }
+  return /\[[^\]]+\]/.test(text);
+}
+
 function hasStableModelIdentity(identity = {}) {
   const source = normalizeModelIdentity(identity);
   return Boolean(source.modelGuid || source.documentUid || source.modelPath);
@@ -233,6 +288,21 @@ function normalizeInteger(value, fallback, min, max) {
 function normalizeNumber(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0;
+}
+
+function pushMissing(missing, code) {
+  const text = normalizeText(code, "");
+  if (text && !missing.includes(text)) {
+    missing.push(text);
+  }
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set(
+    values
+      .map((value) => normalizeText(value, ""))
+      .filter(Boolean),
+  ));
 }
 
 function parseBoolean(value, fallback) {

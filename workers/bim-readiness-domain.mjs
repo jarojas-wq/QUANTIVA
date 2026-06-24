@@ -603,6 +603,9 @@ function createRevitLocalSessionRuntimeCheck(input) {
       manifestAssemblyPath: String(input.manifestAssemblyPath || ""),
       manifestAssemblyExists: input.manifestAssemblyExists === true,
       manifestAssemblyLastWriteTime: String(input.manifestAssemblyLastWriteTime || ""),
+      sourceRoot: String(input.sourceRoot || ""),
+      sourceLastWriteTime: String(input.sourceLastWriteTime || ""),
+      assemblyIsOlderThanSource: input.assemblyIsOlderThanSource === true,
       loadedBridgeAddin: input.loadedBridgeAddin === true,
       loadedAssemblyMatchesManifest: input.loadedAssemblyMatchesManifest === true,
       loadedAddinModules: Array.isArray(input.loadedAddinModules) ? input.loadedAddinModules : [],
@@ -618,6 +621,12 @@ function createRevitLocalSessionCommands(status, missing, version) {
   }
   if (missing.includes("REVIT_ADDIN_RESTART_REQUIRED")) {
     return [`Cierra y vuelve a abrir Revit ${String(version || "2025")}.`];
+  }
+  if (missing.includes("REVIT_ADDIN_BUILD_REQUIRED")) {
+    return [
+      `dotnet build ..\\REVIT-MODEL-AUDITOR\\src\\RevitModelAudit.Revit\\RevitModelAudit.Revit.csproj -f net8.0-windows`,
+      `powershell -NoProfile -ExecutionPolicy Bypass -File ..\\REVIT-MODEL-AUDITOR\\installer\\install.ps1 -RevitVersion ${String(version || "2025")} -Configuration Debug -Scope CurrentUser`,
+    ];
   }
   if (missing.includes("REVIT_ADDIN_MANIFEST") || missing.includes("REVIT_ADDIN_ASSEMBLY")) {
     return [`powershell -NoProfile -ExecutionPolicy Bypass -File ..\\REVIT-MODEL-AUDITOR\\installer\\install.ps1 -RevitVersion ${String(version || "2025")} -Configuration Debug -Scope CurrentUser`];
