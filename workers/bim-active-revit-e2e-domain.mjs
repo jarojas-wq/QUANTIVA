@@ -76,7 +76,7 @@ export function createActiveRevitE2ePlan(config = {}, bridgeSummary = {}) {
   if (!presence.online) {
     missing.push("ACTIVE_REVIT_BRIDGE_PRESENCE");
   }
-  if (presence.online && !presence.latestRequestedBy) {
+  if (!presence.latestRequestedBy && (presence.online || presence.latestDiagnostic.signedIn === false)) {
     missing.push("ACTIVE_REVIT_GOOGLE_SIGN_IN");
   }
   if (!requestedBy) {
@@ -160,6 +160,18 @@ function normalizeBridgePresence(input = {}) {
     latestSeenAt: normalizeText(presence.latestSeenAt, ""),
     latestRequestedBy: normalizeEmail(presence.latestRequestedBy),
     latestModelIdentity: normalizeModelIdentity(presence.latestModelIdentity),
+    latestDiagnostic: normalizeBridgeDiagnostic(
+      presence.latestDiagnostic
+        || presence.latestModelIdentity?.bridgeDiagnostic
+        || {},
+    ),
+  };
+}
+
+function normalizeBridgeDiagnostic(diagnostic = {}) {
+  const source = diagnostic && typeof diagnostic === "object" && !Array.isArray(diagnostic) ? diagnostic : {};
+  return {
+    signedIn: typeof source.signedIn === "boolean" ? source.signedIn : undefined,
   };
 }
 
