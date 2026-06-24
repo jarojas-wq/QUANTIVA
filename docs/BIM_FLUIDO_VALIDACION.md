@@ -10,7 +10,7 @@ No debe contener cookies, tokens, API keys ni secretos.
 - Jobs BIM: persistidos en MySQL con estados `queued`, `claimed`, `running`, `applying`, `completed`, `failed` y `cancelled`.
 - Worker cloud: disponible con proveedor `simulated-aps` y contrato preparado para APS Design Automation.
 - Backend local validado en `http://127.0.0.1:5500`.
-- Revit live E2E pendiente porque requiere Revit 2025 abierto y sesion web editor activa.
+- Revit live E2E validado con Revit 2025 abierto, add-in actualizado, modelo activo y sesion Google del add-in.
 
 ## Evidencia local verificada
 
@@ -33,47 +33,56 @@ npm.cmd run bim:revit-session
 
 Resultado observado:
 
-- `npm.cmd test`: 194 tests OK.
+- `npm.cmd test`: 202 tests OK.
 - `npm.cmd run build`: OK.
 - `node --check server.js`: OK.
 - `npm.cmd run bim:fluency-check`: OK con 10k, 50k y 100k elementos simulados, lotes de 250 y reduccion de renders SSE mayor a 95%.
 - `dotnet build`: 0 errores; solo warnings de nulabilidad/conflictos de referencias Revit/.NET.
 - `worker:bim:check`: proveedor `simulated-aps` OK.
-- `worker:bim:once`: backend OK; no habia jobs `cloud-model` pendientes.
-- `bim:readiness`: backend MySQL, worker cloud, settings locales Revit Bridge y cola Revit consultable OK.
-- `bim:api-smoke`: health OK; omitido sin crear datos porque falta `BIM_SMOKE_SESSION_COOKIE`.
-- `bim:bridge-smoke`: health OK; no reclamo jobs ajenos.
-- `bim:bridge-e2e-smoke`: health OK; omitido porque faltan `BIM_BRIDGE_E2E_SMOKE_SESSION_COOKIE` y `BIM_BRIDGE_E2E_REQUESTED_BY`.
-- `bim:revit-session`: manifiesto y DLL existen; Revit no esta abierto.
+- `worker:bim:once`: backend OK.
+- `bim:readiness`: backend MySQL, fluidez local, Revit local, Revit Bridge activo y cola Revit OK; solo APS live queda en fase 2 por `BIM_APS_ACTIVITY_ID`.
+- `bim:api-smoke`: crea, consulta, cancela y reintenta jobs OK.
+- `bim:bridge-smoke`: claim, progreso, artefactos y completion OK.
+- `bim:bridge-e2e-smoke`: contrato active-revit simulado OK, incluyendo rechazo de usuario ausente, mismatch de propiedad y paginas de operaciones.
+- `bim:active-revit-e2e`: crea job real `active-revit`, Revit lo reclama con `revit-DESKTOP-SE7TJ8Q-2025`, reporta progreso y el smoke lo cancela limpio despues de observar progreso.
+- `bim:revit-session`: manifiesto, DLL, source freshness y modulo cargado en Revit 2025 OK.
 
-## Cierre pendiente para validar en vivo
+## Revalidacion en vivo
 
-Para declarar el objetivo completo como validado, ejecutar con Revit abierto:
+Para repetir la validacion local/web/Revit:
 
 1. Abrir Revit 2025 con el add-in cargado.
-2. Iniciar sesion web en Itemicostos con un usuario editor/admin.
-3. Preparar `.env` sin imprimir la cookie:
+2. Abrir el modelo objetivo.
+3. Iniciar sesion con Google desde `RevitModelAudit > Iniciar Sesion`.
+4. Iniciar sesion web en Itemicostos con un usuario editor/admin.
+5. Preparar `.env` sin imprimir la cookie:
 
 ```powershell
 npm.cmd run bim:prepare-smoke -- --session-cookie "<cookie>"
 ```
 
-4. Confirmar readiness:
+6. Confirmar readiness:
 
 ```powershell
 npm.cmd run bim:readiness
 ```
 
-Debe quedar listo o, como minimo, sin faltantes de:
+Debe quedar sin faltantes de:
 
 - `BIM_SMOKE_SESSION_COOKIE`
 - `BIM_BRIDGE_SMOKE_SESSION_COOKIE`
 - `BIM_BRIDGE_E2E_SMOKE_SESSION_COOKIE`
 - `BIM_BRIDGE_E2E_REQUESTED_BY`
 - `REVIT_PROCESS_OPEN`
+- `REVIT_ADDIN_LOADED`
+- `REVIT_ADDIN_RESTART_REQUIRED`
+- `REVIT_ADDIN_BUILD_REQUIRED`
+- `ACTIVE_REVIT_MODEL_OPEN`
 - `ACTIVE_REVIT_BRIDGE_PRESENCE`
+- `ACTIVE_REVIT_GOOGLE_SIGN_IN`
+- `ACTIVE_REVIT_BRIDGE_ID_MISMATCH`
 
-5. Ejecutar smokes autenticados:
+7. Ejecutar smokes autenticados:
 
 ```powershell
 npm.cmd run bim:api-smoke
@@ -82,7 +91,7 @@ npm.cmd run bim:bridge-e2e-smoke
 npm.cmd run bim:active-revit-e2e
 ```
 
-6. Verificar que:
+8. Verificar que:
 
 - La web crea jobs y responde inmediatamente con `jobId`.
 - SSE entrega progreso con `retry` y metricas de tiempo.
@@ -116,3 +125,4 @@ Validar contra APS vivo:
 npm.cmd run worker:bim:check-live
 ```
 
+Si `npm.cmd run worker:bim:list-activities` devuelve `product-access-missing` con mensaje de `client_id` sin acceso al producto API, la app configurada en Autodesk Platform Services aun no tiene habilitado Automation API / Design Automation API. Habilitar ese producto en la app, volver a listar activities y configurar `BIM_APS_ACTIVITY_ID` con la activity publicada.
