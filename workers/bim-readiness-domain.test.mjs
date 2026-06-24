@@ -55,6 +55,68 @@ describe("BIM readiness runtime domain", () => {
     });
   });
 
+  it("marks the local hybrid BIM flow ready while APS live remains phase-two config", () => {
+    const report = createBimReadinessReport({
+      REVIT_INGEST_API_KEY: "bridge-key",
+      BIM_WORKER_API_KEY: "bridge-key",
+      BIM_SMOKE_PROJECT_ID: "project-1",
+      BIM_SMOKE_SESSION_COOKIE: "session-value",
+      BIM_BRIDGE_E2E_REQUESTED_BY: "operador@empresa.com",
+      BIM_WORKER_PROVIDER: "simulated-aps",
+    }, {
+      revitBridgeSettings: {
+        checked: true,
+        exists: true,
+        settings: {
+          projectUid: "project-1",
+          web: {
+            ingestApiKey: "bridge-key",
+            baseUrl: "http://127.0.0.1:5500/",
+            autoClaimBimJobs: true,
+          },
+        },
+      },
+      fluencyReport: createReadyFluencyReport(),
+      bridgeQueueSummary: {
+        summary: {
+          bridgePresence: {
+            online: true,
+            latestBridgeId: "revit-local",
+            latestRequestedBy: "operador@empresa.com",
+            latestModelIdentity: {
+              modelGuid: "model-live",
+              documentUid: "doc-live",
+              modelPath: "C:/Models/live.rvt",
+            },
+          },
+        },
+      },
+    });
+    const runtimeReport = createBimReadinessRuntimeReport(report, { attempted: true, ok: true }, {
+      bridgeQueueSummary: {
+        attempted: true,
+        ok: true,
+        summary: {
+          activeRevitQueued: 0,
+          bridgePresence: {
+            online: true,
+            onlineCount: 1,
+            latestBridgeId: "revit-local",
+            latestRequestedBy: "operador@empresa.com",
+          },
+        },
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.hybridBimReady).toBe(true);
+    expect(report.readyForRealValidation).toBe(false);
+    expect(report.apsLiveReady).toBe(false);
+    expect(report.missing).toContain("BIM_APS_ACTIVITY_ID");
+    expect(runtimeReport.hybridBimReady).toBe(true);
+    expect(runtimeReport.readyForRealValidation).toBe(false);
+  });
+
   it("separates open Revit queue health from live bridge presence", () => {
     const baseReport = {
       ok: true,
@@ -378,3 +440,32 @@ describe("BIM readiness runtime domain", () => {
     });
   });
 });
+
+function createReadyFluencyReport() {
+  const checks = [
+    "cloud-worker-load",
+    "web-realtime-load",
+    "revit-batch-plan",
+    "revit-bridge-backoff",
+    "revit-cancellation-probe",
+    "revit-transaction-failure",
+  ].map((id) => ({
+    id,
+    ok: true,
+  }));
+  return {
+    checked: true,
+    exists: true,
+    path: "data/bim-fluency-check.json",
+    report: {
+      ok: true,
+      generatedAt: "2026-06-24T10:00:00.000Z",
+      summary: {
+        checkCount: checks.length,
+        failedCount: 0,
+        totalSimulatedElements: 320000,
+      },
+      checks,
+    },
+  };
+}

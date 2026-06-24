@@ -13,6 +13,7 @@ import {
   getBimJobTargetModeLabel,
   getBimReadinessLabel,
   getBimReadinessMissingSummary,
+  getBimReadinessPhaseSummary,
   getBimReadinessTone,
   hasExecutableBimApplyPlan,
   hasBimApplyJobForPreview,
@@ -452,6 +453,7 @@ describe("BIM jobs domain", () => {
       apsLiveReady: false,
       artifactDownloadsReady: true,
       apsProviderCheckReady: false,
+      hybridBimReady: true,
       readyForRealValidation: false,
       missing: ["BIM_APS_ACTIVITY_ID", "", "BIM_SMOKE_PROJECT_ID"],
       checks: [
@@ -467,9 +469,11 @@ describe("BIM jobs domain", () => {
     expect(report.checks[0]).toMatchObject({ id: "backend", status: "ok" });
     expect(report.checks[1]).toMatchObject({ id: "smoke", status: "critical" });
     expect(report.checks[2]).toMatchObject({ id: "aps", status: "warning" });
-    expect(getBimReadinessTone(report)).toBe("warning");
-    expect(getBimReadinessLabel(report)).toBe("Puente local listo");
+    expect(report.hybridBimReady).toBe(true);
+    expect(getBimReadinessTone(report)).toBe("ok");
+    expect(getBimReadinessLabel(report)).toBe("Hibrido local listo");
     expect(getBimReadinessMissingSummary(report, 1)).toBe("BIM_APS_ACTIVITY_ID +1");
+    expect(getBimReadinessPhaseSummary(report, 1)).toBe("APS fase 2: BIM_APS_ACTIVITY_ID +1");
   });
 
   it("selects Revit-oriented readiness checks for the BIM control panel", () => {

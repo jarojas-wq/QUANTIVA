@@ -185,6 +185,14 @@ export function createBimReadinessReport(env = {}, context = {}) {
   const artifactDownloadsReady = artifactRedirectMissing.length === 0;
   const apsProviderCheckReady = apsProviderCheck.missing.length === 0;
   const localFluencyReady = fluencyGate.ok;
+  const cloudWorkerReady = cloudWorkerMissing.length === 0;
+  const apiSmokeReady = apiSmokeMissing.length === 0;
+  const bridgeSmokeReady = bridgeSmokeMissing.length === 0;
+  const hybridBimReady = activeRevitE2eReady
+    && cloudWorkerReady
+    && localFluencyReady
+    && apiSmokeReady
+    && bridgeSmokeReady;
   const readyForRealValidation = activeRevitE2eReady
     && apsLiveReady
     && artifactDownloadsReady
@@ -198,15 +206,16 @@ export function createBimReadinessReport(env = {}, context = {}) {
     providerId,
     derivedConfig: derivedEnv.summary,
     readyForRealValidation,
+    hybridBimReady,
     activeRevitE2eReady,
     apsLiveReady,
     artifactDownloadsReady,
     apsProviderCheckReady,
     localFluencyReady,
-    cloudWorkerReady: cloudWorkerMissing.length === 0,
+    cloudWorkerReady,
     revitBridgeLocalSettingsReady,
-    apiSmokeReady: apiSmokeMissing.length === 0,
-    bridgeSmokeReady: bridgeSmokeMissing.length === 0,
+    apiSmokeReady,
+    bridgeSmokeReady,
     missing,
     checks,
     nextCommands: createNextCommands(checks),
@@ -312,6 +321,9 @@ export function createBimReadinessRuntimeReport(report = {}, backendHealth = {},
   const readyForRealValidation = Boolean(report.readyForRealValidation)
     && backendHealthReady
     && blockingChecks.length === 0;
+  const hybridBimReady = Boolean(report.hybridBimReady)
+    && backendHealthReady
+    && blockingChecks.length === 0;
 
   return {
     ...report,
@@ -320,6 +332,7 @@ export function createBimReadinessRuntimeReport(report = {}, backendHealth = {},
     ok: Boolean(report.ok) && backendHealthReady && blockingChecks.length === 0,
     status: readyForRealValidation ? "ready" : "needs-config",
     readyForRealValidation,
+    hybridBimReady,
     missing,
     checks: checksWithBridgeQueue,
     nextCommands,

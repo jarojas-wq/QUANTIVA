@@ -69,6 +69,14 @@ export function normalizeIncomingBimJobProgress(payload, options = {}) {
   };
 }
 
+export function normalizeIncomingBimBridgeReporterId(sourceInput, fallback = "") {
+  const bridgeId = getInputValue(sourceInput, "bridgeId")
+    || getInputValue(sourceInput, "workerId")
+    || getInputValue(sourceInput, "BridgeId")
+    || getInputValue(sourceInput, "WorkerId");
+  return normalizeIdentifier(bridgeId, fallback);
+}
+
 export function normalizeBimJobProgressPercent(value, status = "running") {
   return clampNumber(value, 0, 100, isTerminalBimJobStatus(status) ? 100 : 0);
 }
@@ -150,11 +158,15 @@ function isCloudModelCommand(commandType) {
 }
 
 function getSearchParam(searchParams, key) {
-  if (searchParams && typeof searchParams.get === "function") {
-    return searchParams.get(key);
+  return getInputValue(searchParams, key);
+}
+
+function getInputValue(source, key) {
+  if (source && typeof source.get === "function") {
+    return source.get(key);
   }
-  if (searchParams && typeof searchParams === "object") {
-    return searchParams[key];
+  if (source && typeof source === "object") {
+    return source[key];
   }
   return "";
 }

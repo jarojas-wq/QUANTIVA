@@ -67,6 +67,7 @@ describe("backend S10 contract", () => {
     const bimJobsDomain = readRepoFile("src/application/budget/bim-jobs-domain.ts");
     const styles = readRepoFile("styles.css");
     const apiSmoke = readRepoFile("workers/bim-api-smoke.mjs");
+    const bridgeSmoke = readRepoFile("workers/bim-bridge-smoke.mjs");
     const bridgeE2eSmoke = readRepoFile("workers/bim-bridge-e2e-smoke.mjs");
     const smokeConfig = readRepoFile("workers/bim-smoke-config.mjs");
     const smokeConfigDomain = readRepoFile("workers/bim-smoke-config-domain.mjs");
@@ -239,7 +240,8 @@ describe("backend S10 contract", () => {
     expect(ownershipDomain).toContain("BIM_JOB_OWNERSHIP_MISMATCH");
     expect(server).toContain("MTRD_BimJob_ClaimedBy AS claimed_by");
     expect(server).toContain("canAccessBimJobOperationsForClaim(job.claimedBy, bridgeId)");
-    expect(server).toContain("payload?.bridgeId || payload?.workerId || \"revit-bridge\"");
+    expect(server).toContain("normalizeIncomingBimBridgeReporterId(payload, \"revit-bridge\")");
+    expect(jobCommandDomain).toContain("normalizeIncomingBimBridgeReporterId");
     expect(server).toContain("listBimJobArtifacts");
     expect(server).toContain("loadBimJobArtifact");
     expect(server).toContain("streamBimArtifactDownload");
@@ -349,6 +351,10 @@ describe("backend S10 contract", () => {
     expect(bridgeE2eSmoke).toContain("ownership-mismatch");
     expect(bridgeE2eSmoke).toContain("artifact-before-claim");
     expect(bridgeE2eSmoke).toContain("artifact-ownership-mismatch");
+    expect(bridgeSmoke).toContain("artifact-download");
+    expect(bridgeSmoke).toContain("requestText");
+    expect(bridgeSmoke).toContain("x-itemicostos-artifact-id");
+    expect(bridgeSmoke).toContain("api/bim/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifact.id)}/download");
     expect(bridgeE2eSmoke).toContain("BIM_JOB_OWNERSHIP_MISMATCH");
     expect(bridgeE2eSmoke).toContain("statusCode === 409");
     expect(bridgeE2eSmoke).toContain("requestedBy: config.requestedBy");
@@ -419,6 +425,7 @@ describe("backend S10 contract", () => {
     expect(readiness).toContain("revit-transaction-failure");
     expect(readRepoFile("src/application/budget/bim-readiness-api-domain.mjs")).toContain("createBackendBimReadinessSnapshot");
     expect(readiness).toContain("readyForRealValidation");
+    expect(readiness).toContain("hybridBimReady");
     expect(readiness).toContain("active-revit-e2e-smoke");
     expect(readiness).toContain("active-revit-bridge-presence-runtime");
     expect(readiness).toContain("active-revit-bridge-claim-runtime");

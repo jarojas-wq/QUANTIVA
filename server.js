@@ -69,6 +69,7 @@ import {
   normalizeBimJobLogLevel,
   normalizeBimJobStatus,
   normalizeBimJobTargetMode,
+  normalizeIncomingBimBridgeReporterId,
   normalizeIncomingBimClaimIdentity,
   normalizeIncomingBimJobCreate,
   normalizeIncomingBimJobProgress,
@@ -983,7 +984,7 @@ const server = http.createServer(async (request, response) => {
         respondJson(response, 403, { ok: false, error: "No tienes acceso al proyecto solicitado." });
         return;
       }
-      const bridgeId = String(url.searchParams.get("bridgeId") || url.searchParams.get("workerId") || "").trim();
+      const bridgeId = normalizeIncomingBimBridgeReporterId(url.searchParams, "");
       if (!canAccessBimJobOperationsForClaim(job.claimedBy, bridgeId)) {
         respondJson(response, 409, {
           ok: false,
@@ -1038,7 +1039,7 @@ const server = http.createServer(async (request, response) => {
       let artifacts;
       try {
         artifacts = await storage.saveBimJobArtifacts(jobUidForArtifacts, payload?.artifacts, {
-          bridgeId: payload?.bridgeId || payload?.workerId || "bim-worker",
+          bridgeId: normalizeIncomingBimBridgeReporterId(payload, "bim-worker"),
         });
       } catch (error) {
         if (error instanceof BimJobOwnershipError) {
@@ -1084,7 +1085,7 @@ const server = http.createServer(async (request, response) => {
         job = await storage.updateBimJobProgress(
           jobUidForProgress,
           payload,
-          { bridgeId: payload?.bridgeId || payload?.workerId || "revit-bridge" },
+          { bridgeId: normalizeIncomingBimBridgeReporterId(payload, "revit-bridge") },
         );
       } catch (error) {
         if (error instanceof BimJobOwnershipError) {

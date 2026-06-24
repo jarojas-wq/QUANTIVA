@@ -263,4 +263,21 @@ describe("active Revit real E2E domain", () => {
     expect(isActiveRevitE2eSatisfied(observation, { waitForCompletion: false })).toBe(true);
     expect(isActiveRevitE2eSatisfied(observation, { waitForCompletion: true })).toBe(false);
   });
+
+  it("does not treat the initial claim marker as real Revit progress", () => {
+    const observation = summarizeActiveRevitE2eJobObservation({
+      id: "job-claimed",
+      status: "claimed",
+      claimedBy: "revit-local",
+      percent: 1,
+      stage: "Tomado por Revit",
+    });
+
+    expect(observation).toMatchObject({
+      claimObserved: true,
+      progressObserved: false,
+      terminal: false,
+    });
+    expect(isActiveRevitE2eSatisfied(observation, { waitForCompletion: false })).toBe(false);
+  });
 });

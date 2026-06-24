@@ -41,12 +41,14 @@ import {
   canRetryBimJob,
   getActiveRevitReadinessLabel,
   getActiveRevitReadinessMissingSummary,
-  getActiveRevitReadinessTone,
   getBimJobCreateModelIdentityIssue,
   getBimJobBridgeWaitDiagnostic,
   getBimJobFluencyMetrics,
   getBimJobStatusLabel,
   getBimJobTargetModeLabel,
+  getBimReadinessLabel,
+  getBimReadinessPhaseSummary,
+  getBimReadinessTone,
   hasBimApplyJobForPreview,
   isBimJobFinished,
   normalizeBimJobRecord,
@@ -3239,15 +3241,15 @@ function BimReadinessPanel(props: { state: BimReadinessPanelState }) {
   }
 
   const report = props.state.report;
-  const tone = getActiveRevitReadinessTone(report);
+  const tone = getBimReadinessTone(report);
   const visibleChecks = selectActiveRevitReadinessVisibleChecks(report);
 
   return (
     <div className={`bim-readiness-card bim-readiness-card--${tone}`}>
       <div className="bim-readiness-head">
         <div>
-          <strong>{getActiveRevitReadinessLabel(report)}</strong>
-          <span>{`Backend BIM | ${report.storage.label || report.storage.kind || "storage sin declarar"}`}</span>
+          <strong>{getBimReadinessLabel(report)}</strong>
+          <span>{`${getActiveRevitReadinessLabel(report)} | Backend BIM | ${report.storage.label || report.storage.kind || "storage sin declarar"}`}</span>
         </div>
         <span className={`bim-readiness-badge bim-readiness-badge--${tone}`}>
           {formatBimReadinessTone(tone)}
@@ -3262,7 +3264,8 @@ function BimReadinessPanel(props: { state: BimReadinessPanelState }) {
         ))}
       </div>
       <div className="bim-readiness-foot">
-        <span>{`Pendientes: ${getActiveRevitReadinessMissingSummary(report)}`}</span>
+        <span>{`Revit: ${getActiveRevitReadinessMissingSummary(report)}`}</span>
+        <span>{getBimReadinessPhaseSummary(report)}</span>
         {props.state.loading && <span>Actualizando...</span>}
       </div>
     </div>

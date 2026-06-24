@@ -111,6 +111,7 @@ export function createBackendBimReadinessSnapshot(env = {}, context = {}) {
   const apsProviderCheckReady = apsProviderCheck.missing.length === 0;
   const cloudWorkerReady = workerApiKeyConfigured
     && (providerId !== "aps-design-automation" || (apsLiveReady && artifactDownloadsReady && apsProviderCheckReady));
+  const hybridBimReady = activeRevitBridgeReady && cloudWorkerReady;
 
   return {
     ok: blockingChecks.length === 0,
@@ -126,6 +127,7 @@ export function createBackendBimReadinessSnapshot(env = {}, context = {}) {
     apsLiveReady,
     artifactDownloadsReady,
     apsProviderCheckReady,
+    hybridBimReady,
     readyForRealValidation: activeRevitBridgeReady && apsLiveReady && artifactDownloadsReady && apsProviderCheckReady,
     missing,
     checks,

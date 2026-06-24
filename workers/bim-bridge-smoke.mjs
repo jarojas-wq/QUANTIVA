@@ -90,6 +90,15 @@ try {
   });
   const artifactCount = Array.isArray(artifacts.artifacts) ? artifacts.artifacts.length : 0;
   result.steps.push({ name: "artifacts", ok: artifactCount > 0, count: artifactCount });
+  const firstArtifact = Array.isArray(artifacts.artifacts) ? artifacts.artifacts[0] : null;
+  const download = await downloadArtifact(job.id, firstArtifact);
+  result.steps.push({
+    name: "artifact-download",
+    ok: download.ok,
+    artifactId: firstArtifact?.id || "",
+    statusCode: download.statusCode,
+    contentType: download.contentType,
+  });
 
   const completed = await reportProgress(job.id, createBimBridgeSmokeCompletedProgress(job, config, artifactCount));
   result.steps.push({ name: "progress-completed", ok: completed.job?.status === "completed", status: completed.job?.status || "" });
@@ -114,6 +123,27 @@ async function reportProgress(jobId, progress) {
   });
 }
 
+async function downloadArtifact(jobId, artifact) {
+  if (!artifact?.id) {
+    return {
+      ok: false,
+      statusCode: 0,
+      contentType: "",
+    };
+  }
+  const response = await requestText(
+    `api/bim/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifact.id)}/download`,
+    { auth: "session" },
+  );
+  return {
+    ok: response.statusCode === 200
+      && response.text.includes('"source": "bim-bridge-smoke"')
+      && response.artifactId === artifact.id,
+    statusCode: response.statusCode,
+    contentType: response.contentType,
+  };
+}
+
 async function requestJson(relativePath, options = {}) {
   const endpoint = new URL(relativePath.replace(/^\/+/, ""), config.baseUrl);
   const response = await fetch(endpoint, {
@@ -132,6 +162,28 @@ async function requestJson(relativePath, options = {}) {
     throw new Error(payload.error || payload.detail || `HTTP ${response.status}`);
   }
   return payload;
+}
+
+async function requestText(relativePath, options = {}) {
+  const endpoint = new URL(relativePath.replace(/^\/+/, ""), config.baseUrl);
+  const response = await fetch(endpoint, {
+    method: options.method || "GET",
+    headers: {
+      "Accept": "*/*",
+      ...(options.auth !== "session" ? { "X-Itemicostos-Key": config.apiKey } : {}),
+      ...(options.auth === "session" ? { "Cookie": config.sessionCookie } : {}),
+    },
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return {
+    statusCode: response.status,
+    contentType: response.headers.get("content-type") || "",
+    artifactId: response.headers.get("x-itemicostos-artifact-id") || "",
+    text,
+  };
 }
 
 async function cancelCreatedJobIfNeeded() {

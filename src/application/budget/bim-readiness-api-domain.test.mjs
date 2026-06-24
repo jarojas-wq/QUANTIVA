@@ -32,6 +32,7 @@ describe("backend BIM readiness API domain", () => {
     expect(report.apsLiveReady).toBe(true);
     expect(report.artifactDownloadsReady).toBe(true);
     expect(report.apsProviderCheckReady).toBe(true);
+    expect(report.hybridBimReady).toBe(true);
     expect(report.readyForRealValidation).toBe(true);
     expect(report.baseUrl).toBe("http://127.0.0.1:5500/");
     expect(report.storage.kind).toBe("mysql");
@@ -57,6 +58,7 @@ describe("backend BIM readiness API domain", () => {
 
     expect(report.ok).toBe(true);
     expect(report.cloudWorkerReady).toBe(true);
+    expect(report.hybridBimReady).toBe(true);
     expect(report.apsLiveReady).toBe(false);
     expect(report.readyForRealValidation).toBe(false);
     expect(report.missing).toEqual(expect.arrayContaining([
@@ -149,6 +151,7 @@ describe("backend BIM readiness API domain", () => {
 
     expect(report.ok).toBe(false);
     expect(report.activeRevitBridgeReady).toBe(false);
+    expect(report.hybridBimReady).toBe(false);
     expect(report.missing).toEqual(expect.arrayContaining([
       "REVIT_INGEST_API_KEY",
       "BIM_WORKER_API_KEY or REVIT_INGEST_API_KEY",

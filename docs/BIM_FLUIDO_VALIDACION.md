@@ -9,6 +9,7 @@ No debe contener cookies, tokens, API keys ni secretos.
 - Bridge Revit: implementado en C# .NET con `ExternalEvent`.
 - Jobs BIM: persistidos en MySQL con estados `queued`, `claimed`, `running`, `applying`, `completed`, `failed` y `cancelled`.
 - Worker cloud: disponible con proveedor `simulated-aps` y contrato preparado para APS Design Automation.
+- Readiness hibrido local: `hybridBimReady=true` cuando Web/API, Revit Bridge, worker contractual y compuertas de fluidez estan listos.
 - Backend local validado en `http://127.0.0.1:5500`.
 - Revit live E2E validado con Revit 2025 abierto, add-in actualizado, modelo activo y sesion Google del add-in.
 
@@ -33,14 +34,14 @@ npm.cmd run bim:revit-session
 
 Resultado observado:
 
-- `npm.cmd test`: 202 tests OK.
+- `npm.cmd test`: 205 tests OK.
 - `npm.cmd run build`: OK.
 - `node --check server.js`: OK.
 - `npm.cmd run bim:fluency-check`: OK con 10k, 50k y 100k elementos simulados, lotes de 250 y reduccion de renders SSE mayor a 95%.
 - `dotnet build`: 0 errores; solo warnings de nulabilidad/conflictos de referencias Revit/.NET.
 - `worker:bim:check`: proveedor `simulated-aps` OK.
 - `worker:bim:once`: backend OK.
-- `bim:readiness`: backend MySQL, fluidez local, Revit local, Revit Bridge activo y cola Revit OK; solo APS live queda en fase 2 por `BIM_APS_ACTIVITY_ID`.
+- `bim:readiness`: backend MySQL, fluidez local, Revit local, Revit Bridge activo y cola Revit OK; `hybridBimReady=true`; solo APS live queda en fase 2 por `BIM_APS_ACTIVITY_ID`.
 - `bim:api-smoke`: crea, consulta, cancela y reintenta jobs OK.
 - `bim:bridge-smoke`: claim, progreso, artefactos y completion OK.
 - `bim:bridge-e2e-smoke`: contrato active-revit simulado OK, incluyendo rechazo de usuario ausente, mismatch de propiedad y paginas de operaciones.
@@ -94,6 +95,7 @@ npm.cmd run bim:active-revit-e2e
 8. Verificar que:
 
 - La web crea jobs y responde inmediatamente con `jobId`.
+- Readiness muestra el hibrido local listo aunque `readyForRealValidation` siga reservado para APS live completo.
 - SSE entrega progreso con `retry` y metricas de tiempo.
 - El bridge solo reclama jobs con API key, usuario Google activo y modelo compatible.
 - Un bridge distinto recibe `409 BIM_JOB_OWNERSHIP_MISMATCH`.

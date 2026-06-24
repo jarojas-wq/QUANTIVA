@@ -85,6 +85,7 @@ export interface BimReadinessReport {
   apsLiveReady: boolean;
   artifactDownloadsReady: boolean;
   apsProviderCheckReady: boolean;
+  hybridBimReady: boolean;
   readyForRealValidation: boolean;
   missing: string[];
   checks: BimReadinessCheck[];
@@ -112,6 +113,7 @@ export function normalizeBimReadinessReport(input: unknown): BimReadinessReport 
     apsLiveReady: normalizeBoolean(source.apsLiveReady),
     artifactDownloadsReady: normalizeBoolean(source.artifactDownloadsReady),
     apsProviderCheckReady: normalizeBoolean(source.apsProviderCheckReady),
+    hybridBimReady: normalizeBoolean(source.hybridBimReady),
     readyForRealValidation: normalizeBoolean(source.readyForRealValidation),
     missing: normalizeTextArray(source.missing),
     checks: Array.isArray(source.checks)
@@ -124,12 +126,14 @@ export function normalizeBimReadinessReport(input: unknown): BimReadinessReport 
 
 export function getBimReadinessTone(report: BimReadinessReport): BimReadinessTone {
   if (report.readyForRealValidation) return "ok";
+  if (report.hybridBimReady) return "ok";
   if (report.activeRevitBridgeReady || report.cloudWorkerReady || report.apsLiveReady) return "warning";
   return "critical";
 }
 
 export function getBimReadinessLabel(report: BimReadinessReport) {
   if (report.readyForRealValidation) return "Listo para validacion real";
+  if (report.hybridBimReady) return "Hibrido local listo";
   if (report.activeRevitBridgeReady) return "Puente local listo";
   if (report.cloudWorkerReady) return "Backend BIM listo";
   return "Configuracion pendiente";
@@ -141,6 +145,12 @@ export function getBimReadinessMissingSummary(report: BimReadinessReport, limit 
   const visible = report.missing.slice(0, visibleLimit);
   const remaining = report.missing.length - visible.length;
   return `${visible.join(", ")}${remaining > 0 ? ` +${remaining}` : ""}`;
+}
+
+export function getBimReadinessPhaseSummary(report: BimReadinessReport, limit = 2) {
+  if (report.readyForRealValidation) return "Validacion real completa";
+  if (report.hybridBimReady) return `APS fase 2: ${getBimReadinessMissingSummary(report, limit)}`;
+  return `Pendientes: ${getBimReadinessMissingSummary(report, limit)}`;
 }
 
 export function getActiveRevitReadinessTone(report: BimReadinessReport): BimReadinessTone {

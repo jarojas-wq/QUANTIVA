@@ -151,7 +151,7 @@ export function summarizeActiveRevitE2eJobObservation(job = {}) {
   const percent = normalizeNumber(job.percent ?? job.progressPercent ?? job.progress);
   const stage = normalizeText(job.stage || job.currentStage, "");
   const terminal = ["completed", "failed", "cancelled"].includes(status);
-  const progressObserved = ["running", "applying", "completed"].includes(status) || percent > 0;
+  const progressObserved = ["running", "applying", "completed"].includes(status) || percent > 1;
   return {
     id: normalizeText(job.id || job.jobId, ""),
     status,

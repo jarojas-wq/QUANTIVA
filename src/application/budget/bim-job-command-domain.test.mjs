@@ -7,6 +7,7 @@ import {
   normalizeBimJobStatus,
   normalizeBimJobTargetMode,
   normalizeBimModelPath,
+  normalizeIncomingBimBridgeReporterId,
   normalizeIncomingBimClaimIdentity,
   normalizeIncomingBimJobCreate,
   normalizeIncomingBimJobProgress,
@@ -162,6 +163,18 @@ describe("BIM job command domain", () => {
       status: "failed",
       percent: 100,
     });
+  });
+
+  it("accepts bridge reporter id aliases from current and legacy clients", () => {
+    expect(normalizeIncomingBimBridgeReporterId({ bridgeId: " revit-local " }, "fallback"))
+      .toBe("revit-local");
+    expect(normalizeIncomingBimBridgeReporterId({ BridgeId: " revit-pascal " }, "fallback"))
+      .toBe("revit-pascal");
+    expect(normalizeIncomingBimBridgeReporterId({ WorkerId: " worker-pascal " }, "fallback"))
+      .toBe("worker-pascal");
+    expect(normalizeIncomingBimBridgeReporterId(new URLSearchParams({ workerId: " worker-query " }), "fallback"))
+      .toBe("worker-query");
+    expect(normalizeIncomingBimBridgeReporterId({}, "fallback")).toBe("fallback");
   });
 
   it("keeps shared BIM command primitives stable", () => {
