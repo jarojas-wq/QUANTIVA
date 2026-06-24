@@ -61,6 +61,7 @@ describe("backend S10 contract", () => {
   });
 
   it("declares BIM job queue persistence and bridge endpoints", () => {
+    const dockerfile = readRepoFile("Dockerfile");
     const sql = readRepoFile("sql/mysql/001_mtrd_itemicostos_real.sql");
     const server = readRepoFile("server.js");
     const workspace = readRepoFile("src/features/workspace/QuantivaWorkspace.tsx");
@@ -104,6 +105,8 @@ describe("backend S10 contract", () => {
     expect(sql).toContain("MTRD_BimJob_ModelKeyHash");
     expect(sql).toContain("IX_MTRD_BimJob_Reutilizable");
     expect(server).toContain("/api/bim/jobs");
+    expect(dockerfile).toContain("COPY --from=build /app/src/application ./src/application");
+    expect(dockerfile).toContain("RUN test -f ./src/application/budget/bim-job-cache-domain.mjs");
     expect(server).toContain("/api/bim/readiness");
     expect(server).toContain("createBackendBimReadinessSnapshot");
     expect(server).toContain("resolveRequestBaseUrl");

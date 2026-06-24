@@ -20,7 +20,9 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server.js ./server.js
+COPY --from=build /app/src/application ./src/application
 COPY --from=build /app/sql ./sql
+RUN test -f ./src/application/budget/bim-job-cache-domain.mjs
 
 EXPOSE 8080
 
