@@ -196,6 +196,8 @@ La persistencia MySQL agrega `MTRD_PresupuestoConfig`, `MTRD_ItemMetrado`, `MTRD
 
 Para procesos BIM pesados, `ITEMICOSTOS` expone una cola asincrona en MySQL. En la UI operativa de Control BIM el usuario crea jobs solo para `Revit activo`; `cloud-model` queda como capacidad backend/worker reservada para pruebas, automatizaciones o fase cloud.
 
+La validacion reproducible del flujo completo esta en `docs/BIM_FLUIDO_VALIDACION.md`; incluye evidencia local, comandos de smoke y el cierre pendiente para Revit abierto con sesion editor.
+
 - `POST /api/bim/jobs`: crea un job con `projectId`, `targetMode`, `commandType`, `payload` y `modelIdentity`. Rechaza comandos `*-apply`/`:apply` y combinaciones contradictorias entre `targetMode` y `commandType`; la aplicacion Revit solo se crea desde `POST /api/bim/jobs/:id/apply` despues de un preview completado.
 - `GET /api/bim/jobs?projectId=...`: lista jobs recientes del proyecto.
 - `GET /api/bim/jobs/summary?projectId=...`: resume la cola por estado, destino, fallos y antiguedad del activo mas viejo.
