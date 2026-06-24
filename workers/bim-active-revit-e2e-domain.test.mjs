@@ -202,6 +202,40 @@ describe("active Revit real E2E domain", () => {
     expect(plan.missing).toEqual(["REVIT_ADDIN_BUILD_REQUIRED"]);
   });
 
+  it("does not target a smoke bridge when validating the real active Revit session", () => {
+    const config = normalizeActiveRevitE2eConfig({
+      REVIT_INGEST_API_KEY: "bridge-key",
+      BIM_SMOKE_SESSION_COOKIE: "session-token",
+      BIM_SMOKE_PROJECT_ID: "project-1",
+      BIM_SMOKE_USER_EMAIL: "operador@empresa.com",
+    });
+    const plan = createActiveRevitE2ePlan(config, {
+      bridgePresence: {
+        online: true,
+        latestBridgeId: "bridge-e2e-smoke-worker",
+        latestRequestedBy: "operador@empresa.com",
+        latestModelIdentity: {
+          modelGuid: "smoke-model",
+          modelPath: "C:/Smoke/bridge-e2e-smoke.rvt",
+        },
+      },
+    }, {
+      checked: true,
+      ok: true,
+      status: "ready",
+      processes: [
+        {
+          id: 123,
+          mainWindowTitle: "Autodesk Revit 2025.4 - [live.rvt - Vista 3D]",
+        },
+      ],
+    });
+
+    expect(plan.ok).toBe(false);
+    expect(plan.bridgeId).toBe("bridge-e2e-smoke-worker");
+    expect(plan.missing).toEqual(["ACTIVE_REVIT_BRIDGE_ID_MISMATCH"]);
+  });
+
   it("normalizes strict mode for final validation gates", () => {
     expect(normalizeActiveRevitE2eConfig({
       BIM_ACTIVE_REVIT_E2E_STRICT: "true",

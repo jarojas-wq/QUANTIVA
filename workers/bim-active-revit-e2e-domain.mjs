@@ -83,6 +83,15 @@ export function createActiveRevitE2ePlan(config = {}, bridgeSummary = {}, localR
   if (localSession.checked && localSession.ok && !localSession.activeModelLikelyOpen) {
     pushMissing(missing, "ACTIVE_REVIT_MODEL_OPEN");
   }
+  if (
+    localSession.checked
+    && localSession.ok
+    && presence.online
+    && presence.latestBridgeId
+    && !isLikelyRevitBridgeId(presence.latestBridgeId)
+  ) {
+    pushMissing(missing, "ACTIVE_REVIT_BRIDGE_ID_MISMATCH");
+  }
   if (!presence.online) {
     pushMissing(missing, "ACTIVE_REVIT_BRIDGE_PRESENCE");
   }
@@ -228,6 +237,10 @@ function isLikelyActiveModelWindowTitle(title) {
     return false;
   }
   return /\[[^\]]+\]/.test(text);
+}
+
+function isLikelyRevitBridgeId(bridgeId) {
+  return /^revit-[a-z0-9_.-]+-\d{4}$/i.test(normalizeText(bridgeId, ""));
 }
 
 function hasStableModelIdentity(identity = {}) {
