@@ -3,6 +3,8 @@ export function normalizeBimRevitLocalSession(input = {}) {
   const processes = normalizeProcesses(source.processes);
   const manifestPath = normalizeText(source.manifestPath);
   const manifestAssemblyPath = normalizeText(source.manifestAssemblyPath);
+  const sourceLastWriteTime = normalizeText(source.sourceLastWriteTime);
+  const assemblyIsOlderThanSource = isOlderTimestamp(source.manifestAssemblyLastWriteTime, sourceLastWriteTime);
   const loadedAddinModules = processes.flatMap((process) => process.loadedModules);
   const loadedBridgeAddin = loadedAddinModules.length > 0;
   const loadedAssemblyMatchesManifest = Boolean(
@@ -15,6 +17,7 @@ export function normalizeBimRevitLocalSession(input = {}) {
     manifestExists: source.manifestExists === true,
     manifestAssemblyPath,
     manifestAssemblyExists: source.manifestAssemblyExists === true,
+    assemblyIsOlderThanSource,
     loadedBridgeAddin,
     loadedAssemblyMatchesManifest,
   });
@@ -31,6 +34,9 @@ export function normalizeBimRevitLocalSession(input = {}) {
     manifestAssemblyPath,
     manifestAssemblyExists: source.manifestAssemblyExists === true,
     manifestAssemblyLastWriteTime: normalizeText(source.manifestAssemblyLastWriteTime),
+    sourceRoot: normalizeText(source.sourceRoot),
+    sourceLastWriteTime,
+    assemblyIsOlderThanSource,
     loadedBridgeAddin,
     loadedAssemblyMatchesManifest,
     loadedAddinModules,
@@ -73,6 +79,9 @@ function resolveMissingCodes(state) {
   if (!state.manifestAssemblyPath || !state.manifestAssemblyExists) {
     missing.push("REVIT_ADDIN_ASSEMBLY");
   }
+  if (state.manifestAssemblyExists && state.assemblyIsOlderThanSource) {
+    missing.push("REVIT_ADDIN_BUILD_REQUIRED");
+  }
   if (state.revitOpen && !state.loadedBridgeAddin) {
     missing.push("REVIT_ADDIN_LOADED");
   }
@@ -91,6 +100,9 @@ function resolveStatus(missing, revitOpen, loadedBridgeAddin, loadedAssemblyMatc
   }
   if (missing.includes("REVIT_ADDIN_ASSEMBLY")) {
     return "assembly-missing";
+  }
+  if (missing.includes("REVIT_ADDIN_BUILD_REQUIRED")) {
+    return "build-required";
   }
   if (!loadedBridgeAddin) {
     return "addin-not-loaded";
@@ -111,6 +123,9 @@ function resolveMessage(status) {
   if (status === "assembly-missing") {
     return "El manifiesto apunta a una DLL que no existe.";
   }
+  if (status === "build-required") {
+    return "El codigo del add-in es mas nuevo que la DLL cargada; cierra Revit, compila/instala y vuelve a abrirlo.";
+  }
   if (status === "addin-not-loaded") {
     return "Revit esta abierto, pero no tiene cargado RevitModelAudit.";
   }
@@ -126,6 +141,12 @@ function samePath(left, right) {
 
 function normalizePath(value) {
   return normalizeText(value).replace(/\//g, "\\").toLowerCase();
+}
+
+function isOlderTimestamp(left, right) {
+  const leftTime = Date.parse(normalizeText(left));
+  const rightTime = Date.parse(normalizeText(right));
+  return Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime < rightTime;
 }
 
 function normalizeText(value) {

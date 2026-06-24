@@ -50,6 +50,39 @@ describe("BIM Revit local session domain", () => {
     expect(result.missing).toContain("REVIT_ADDIN_RESTART_REQUIRED");
   });
 
+  it("requires rebuilding when the add-in source is newer than the manifest DLL", () => {
+    const assemblyPath = "C:/repo/bin/Debug/net8.0-windows/RevitModelAudit.Revit.dll";
+    const result = normalizeBimRevitLocalSession({
+      version: "2025",
+      manifestPath: "C:/Users/me/AppData/Roaming/Autodesk/Revit/Addins/2025/RevitModelAudit.addin",
+      manifestExists: true,
+      manifestAssemblyPath: assemblyPath,
+      manifestAssemblyExists: true,
+      manifestAssemblyLastWriteTime: "2026-06-24T10:27:47.000Z",
+      sourceRoot: "C:/repo/src/RevitModelAudit.Revit",
+      sourceLastWriteTime: "2026-06-24T11:05:00.000Z",
+      processes: [
+        {
+          id: 123,
+          processName: "Revit",
+          loadedModules: [
+            {
+              moduleName: "RevitModelAudit.Revit.dll",
+              fileName: assemblyPath,
+              lastWriteTime: "2026-06-24T10:27:47.000Z",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("build-required");
+    expect(result.assemblyIsOlderThanSource).toBe(true);
+    expect(result.loadedAssemblyMatchesManifest).toBe(true);
+    expect(result.missing).toContain("REVIT_ADDIN_BUILD_REQUIRED");
+  });
+
   it("passes when Revit loads the DLL targeted by the manifest", () => {
     const assemblyPath = "C:/repo/bin/Debug/net8.0-windows/RevitModelAudit.Revit.dll";
     const result = normalizeBimRevitLocalSession({

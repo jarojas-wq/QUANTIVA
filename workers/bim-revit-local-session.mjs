@@ -30,15 +30,21 @@ if (isMainModule()) {
 
 export function probeBimRevitLocalSession(input = {}) {
   const version = String(input.version || process.env.BIM_REVIT_VERSION || "2025").trim() || "2025";
-  return normalizeBimRevitLocalSession(collectLocalRevitSession(version));
+  const sourceRoot = String(
+    input.sourceRoot
+      || process.env.BIM_REVIT_ADDIN_SOURCE_ROOT
+      || resolveDefaultRevitAddinSourceRoot(),
+  ).trim();
+  return normalizeBimRevitLocalSession(collectLocalRevitSession(version, sourceRoot));
 }
 
-export function collectLocalRevitSession(revitVersion) {
+export function collectLocalRevitSession(revitVersion, sourceRoot = "") {
   const script = `
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $version = '${escapePowerShellSingleQuoted(revitVersion)}'
+$sourceRoot = '${escapePowerShellSingleQuoted(sourceRoot)}'
 $manifestPath = Join-Path $env:APPDATA "Autodesk\\Revit\\Addins\\$version\\RevitModelAudit.addin"
 $manifestExists = Test-Path -LiteralPath $manifestPath
 $manifestAssemblyPath = ""
@@ -57,6 +63,19 @@ if ($manifestAssemblyPath) {
   if ($assemblyItem) {
     $manifestAssemblyExists = $true
     $manifestAssemblyLastWriteTime = $assemblyItem.LastWriteTime.ToString("o")
+  }
+}
+$sourceLastWriteTime = ""
+if ($sourceRoot -and (Test-Path -LiteralPath $sourceRoot)) {
+  $sourceItem = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Filter *.cs -ErrorAction SilentlyContinue |
+    Where-Object {
+      $segments = $_.FullName.Split([System.IO.Path]::DirectorySeparatorChar)
+      $segments -notcontains "bin" -and $segments -notcontains "obj" -and $segments -notcontains "artifacts"
+    } |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+  if ($sourceItem) {
+    $sourceLastWriteTime = $sourceItem.LastWriteTime.ToString("o")
   }
 }
 $processes = @()
@@ -92,6 +111,8 @@ Get-Process -Name Revit -ErrorAction SilentlyContinue | ForEach-Object {
   manifestAssemblyPath = $manifestAssemblyPath
   manifestAssemblyExists = $manifestAssemblyExists
   manifestAssemblyLastWriteTime = $manifestAssemblyLastWriteTime
+  sourceRoot = $sourceRoot
+  sourceLastWriteTime = $sourceLastWriteTime
   processes = $processes
 } | ConvertTo-Json -Depth 8
 `;
@@ -111,6 +132,13 @@ Get-Process -Name Revit -ErrorAction SilentlyContinue | ForEach-Object {
 
 function escapePowerShellSingleQuoted(value) {
   return String(value || "").replace(/'/g, "''");
+}
+
+function resolveDefaultRevitAddinSourceRoot() {
+  return path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../../REVIT-MODEL-AUDITOR/src/RevitModelAudit.Revit",
+  );
 }
 
 function parseBoolean(value, fallback) {
