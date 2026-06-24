@@ -76,6 +76,9 @@ export function createActiveRevitE2ePlan(config = {}, bridgeSummary = {}) {
   if (!presence.online) {
     missing.push("ACTIVE_REVIT_BRIDGE_PRESENCE");
   }
+  if (presence.online && !presence.latestRequestedBy) {
+    missing.push("ACTIVE_REVIT_GOOGLE_SIGN_IN");
+  }
   if (!requestedBy) {
     missing.push("ACTIVE_REVIT_BRIDGE_REQUESTED_BY");
   }

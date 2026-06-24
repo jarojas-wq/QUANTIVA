@@ -92,6 +92,9 @@ try {
   }
 
   result.ok = isActiveRevitE2eSatisfied(observation, config);
+  if (!result.ok && result.createdJobId && !observation.terminal) {
+    await cancelJob(result.createdJobId, "cleanup-cancel-unsatisfied");
+  }
   result.status = result.ok ? "ready" : "failed";
   console.log(JSON.stringify(result, null, 2));
   process.exitCode = result.ok ? 0 : 1;

@@ -73,6 +73,30 @@ describe("active Revit real E2E domain", () => {
     ]);
   });
 
+  it("requires the live Revit bridge heartbeat to include the signed-in Google user", () => {
+    const config = normalizeActiveRevitE2eConfig({
+      REVIT_INGEST_API_KEY: "bridge-key",
+      BIM_SMOKE_SESSION_COOKIE: "session-token",
+      BIM_SMOKE_PROJECT_ID: "project-1",
+      BIM_SMOKE_USER_EMAIL: "operador@empresa.com",
+    });
+    const plan = createActiveRevitE2ePlan(config, {
+      bridgePresence: {
+        online: true,
+        latestBridgeId: "revit-local",
+        latestRequestedBy: "",
+        latestModelIdentity: {
+          modelGuid: "model-live",
+          modelPath: "C:/Models/live.rvt",
+        },
+      },
+    });
+
+    expect(plan.ok).toBe(false);
+    expect(plan.requestedBy).toBe("operador@empresa.com");
+    expect(plan.missing).toEqual(["ACTIVE_REVIT_GOOGLE_SIGN_IN"]);
+  });
+
   it("normalizes strict mode for final validation gates", () => {
     expect(normalizeActiveRevitE2eConfig({
       BIM_ACTIVE_REVIT_E2E_STRICT: "true",
